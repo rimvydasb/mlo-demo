@@ -104,15 +104,26 @@ layers along Z.
 
 `mapgen` operates exclusively on cells. Voxel expansion is `render`'s concern.
 
-### Two-pass
+### Building Phases
 
-1. **Macro pass** — build the 6×6 graph. For each of the 60 internal borders, assign a connection type using a
-   **compatibility rule-table** keyed on the two biome types. (Rule-table, _not_ Wave Function Collapse, for the demo:
-   WFC backtracks and is hard to debug under LLM-driven dev. WFC is a documented later upgrade if richer adjacency is
-   wanted.)
-2. **Interior pass** — for each biome, generate the 12³ cell grid honoring: its biome type, its 4 prescribed edge
-   connection types (flat typed strip at cell layer 6), world-space-noise relief in layers 7–12, and element
-   distribution in layers 1–5.
+**Phase I World Build:**
+
+1. Generate the 6×6 grid of biomes, each with a 12³ cell grid, and render one biome for inspection.
+2. For each of the 60 internal borders, assign a connection type using a **compatibility rule-table** keyed on the two
+   biome types.
+
+**Phase II Biome Build:** (for each biome)
+
+1. Update 12³ cell grid honoring: its 4 prescribed edge connection types (flat typed strip at cell layer 6),
+   world-space-noise relief in layers 7–12, and element distribution in layers 1–5.
+2. Shape 1–5 (Underground) layers to the funnel to mimic floating island topography.
+
+**Phase III Cell Shaping:** (for each cell)
+
+1. Shape cell based on `Cell's Voxels Rendering` rules above
+2. For each water to cell transition shape the slope:
+    - If the cell is water and the neighbor on x or y is not water, then the water cell will have bottom layer of vortex
+      of the inherited type of the neighbor cell
 
 ### Determinism contract
 
@@ -124,10 +135,15 @@ layers along Z.
 
 ### Elements / resources
 
-- A small **element set**. Sand and stone are the common base; a handful of rarer elements gate advanced designs. (Exact
-  set is tunable; start with ~4–6.)
-- Some elements are surface-gatherable; others require a **Mine** building to reach the deeper cell layers.
-- One cell holds at most one resource — this is what makes the cell the natural unit of mining.
+| Element | Cell Layer | Rarity (tunable) | Hard Rule |
+|---------|------------|------------------|-----------|
+| stone   | any        | at least 30%     |           |
+| iron    | 1–5        | 10%              |           |
+| gold    | 1–5        | 5%               |           |
+
+---
+
+END OF REVIEW.
 
 ---
 

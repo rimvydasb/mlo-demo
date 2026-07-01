@@ -1,0 +1,15 @@
+[package]
+name    = "voxel-mapgen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+voxel-core  = { workspace = true }
+rand        = { workspace = true }
+rand_chacha = { workspace = true }
+noise       = { workspace = true }
+serde       = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+insta    = { workspace = true }

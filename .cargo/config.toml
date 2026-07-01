@@ -1,0 +1,6 @@
+[alias]
+xtask = "run --package xtask --"
+
+[build]
+rustc    = "/Users/rimvydasbingelis/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc"
+rustdoc  = "/Users/rimvydasbingelis/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustdoc"

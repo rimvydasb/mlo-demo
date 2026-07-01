@@ -1,0 +1,11 @@
+[package]
+name    = "voxel-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+voxel-core   = { workspace = true }
+voxel-mapgen = { workspace = true }
+voxel-render = { workspace = true }
+bevy         = { workspace = true }
+bevy_egui    = { workspace = true }

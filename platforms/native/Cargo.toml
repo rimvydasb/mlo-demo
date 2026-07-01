@@ -1,0 +1,12 @@
+[package]
+name    = "native"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "native"
+path = "src/main.rs"
+
+[dependencies]
+voxel-app = { workspace = true }
+clap      = { workspace = true }

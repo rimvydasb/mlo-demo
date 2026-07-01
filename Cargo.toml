@@ -1,0 +1,35 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/mapgen",
+    "crates/render",
+    "crates/app",
+    "platforms/native",
+    "platforms/web",
+    "xtask",
+]
+resolver = "2"
+
+[workspace.dependencies]
+voxel-core   = { path = "crates/core" }
+voxel-mapgen = { path = "crates/mapgen" }
+voxel-render = { path = "crates/render" }
+voxel-app    = { path = "crates/app" }
+
+bevy      = "0.19"
+bevy_egui = "0.40"
+
+rand        = "0.8"
+rand_chacha = "0.3"
+noise       = "0.9"
+
+serde   = { version = "1", features = ["derive"] }
+anyhow  = "1"
+clap    = { version = "4", features = ["derive"] }
+image   = "0.25"
+
+proptest = "1"
+insta    = { version = "1", features = ["ron"] }
+
+[alias]
+xtask = "run --package xtask --"

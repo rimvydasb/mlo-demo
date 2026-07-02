@@ -1,4 +1,6 @@
-## 18. Phase 1 — Dev-mode map inspector (first deliverable)
+# Implementation Plan
+
+## Phase 1 — Dev-mode map inspector (first deliverable)
 
 **Goal:** generate and visually inspect maps, so biomes, cells, resources, and the cell→voxel visual mapping can be
 refined _before_ any gameplay exists.

@@ -1,4 +1,11 @@
-## 5. Factions
+# Gameplay Specification
+
+A god-game / early-RTS in the spirit of _Mega-Lo-Mania_ (Sensible Software, 1991), rendered as voxel biomes. Target:
+WebAssembly + wgpu (web). Future: iOS. Development is LLM-assisted (Claude CLI) with the user as architect.
+
+---
+
+## Factions
 
 - **4 deities**: player + 3 AI. Colors/identities follow MLM convention (Scarlet, Caesar, Oberon, Madcap) or your own
   theme.

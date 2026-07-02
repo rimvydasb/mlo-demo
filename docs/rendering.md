@@ -1,4 +1,4 @@
-# Voxel Mega-Lo-Mania — Rendering Specification
+# Rendering Specification
 
 A god-game / early-RTS in the spirit of _Mega-Lo-Mania_ (Sensible Software, 1991), rendered as voxel biomes. Target:
 WebAssembly + wgpu (web). Future: iOS. Development is LLM-assisted (Claude CLI) with the user as architect.
@@ -104,6 +104,8 @@ layers along Z.
 `mapgen` operates exclusively on cells. Voxel expansion is `render`'s concern.
 
 ### Building Phases
+
+> 
 
 **Phase I World Build:**
 

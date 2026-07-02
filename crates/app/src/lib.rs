@@ -1,9 +1,13 @@
+mod assets;
 mod clouds;
+mod decor;
 mod inspector;
 mod picking;
 pub mod state;
 
+pub use assets::DecorAssets;
 pub use clouds::{CloudsEnabled, CloudsPlugin};
+pub use decor::{DecorEnabled, DecorPlugin};
 pub use state::{scenic_biome, InspectorState, WorldMapResource};
 
 use bevy::ecs::message::MessageWriter;
@@ -28,6 +32,9 @@ pub struct AppOptions {
     pub clouds: bool,
     /// The optional MICROHEIGHT beautification rule (A/B flag).
     pub microheight: bool,
+    /// Fauna & flora decoration props. Placement is deterministic, but the
+    /// idle animations are time-based — disable for byte-stable screenshots.
+    pub decor: bool,
 }
 
 impl Default for AppOptions {
@@ -35,6 +42,7 @@ impl Default for AppOptions {
         Self {
             clouds: true,
             microheight: false,
+            decor: true,
         }
     }
 }
@@ -58,17 +66,20 @@ pub fn run_screenshot(
 ) {
     let mut app = App::new();
     app.add_plugins((
-        DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "screenshot".into(),
-                resolution: bevy::window::WindowResolution::new(1280, 800),
-                visible: true,
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "screenshot".into(),
+                    resolution: bevy::window::WindowResolution::new(1280, 800),
+                    visible: true,
+                    ..default()
+                }),
                 ..default()
-            }),
-            ..default()
-        }),
+            })
+            .set(assets::asset_plugin()),
         RenderPlugin,
         CloudsPlugin,
+        DecorPlugin,
     ));
     let map = voxel_mapgen::generate(seed);
     let focus = biome.unwrap_or_else(|| scenic_biome(&map));
@@ -76,6 +87,7 @@ pub fn run_screenshot(
         .insert_resource(WorldMapResource(map))
         .insert_resource(InspectorState::new(seed))
         .insert_resource(CloudsEnabled(opts.clouds))
+        .insert_resource(DecorEnabled(opts.decor))
         .insert_resource(opts.beautify())
         .insert_resource(ScreenshotOutPath(out))
         .add_systems(Update, (rebuild_scene, drive_screenshot))
@@ -89,8 +101,19 @@ fn drive_screenshot(
     mut commands: Commands,
     path: Res<ScreenshotOutPath>,
     mut frame: Local<u32>,
+    mut waited: Local<u32>,
     mut exit: MessageWriter<AppExit>,
+    server: Res<AssetServer>,
+    decor_assets: Res<DecorAssets>,
+    decor_enabled: Res<DecorEnabled>,
 ) {
+    // Hold the capture countdown until the decor GLBs (and their textures)
+    // are in, so props are never captured half-loaded. Capped so a broken
+    // asset can't hang the runner.
+    *waited += 1;
+    if decor_enabled.0 && *waited < 600 && !decor_assets.all_loaded(&server) {
+        return;
+    }
     *frame += 1;
     match *frame {
         // Frame 5: request screenshot (after the scene has had frames to render)
@@ -110,23 +133,27 @@ fn drive_screenshot(
 pub fn run_inspector(seed: u64, opts: AppOptions) {
     let mut app = App::new();
     app.add_plugins((
-        DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: format!("Voxel MLM Inspector — seed {seed}"),
-                resolution: bevy::window::WindowResolution::new(1280, 800),
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: format!("Voxel MLM Inspector — seed {seed}"),
+                    resolution: bevy::window::WindowResolution::new(1280, 800),
+                    ..default()
+                }),
                 ..default()
-            }),
-            ..default()
-        }),
+            })
+            .set(assets::asset_plugin()),
         EguiPlugin::default(),
         RenderPlugin,
         CloudsPlugin,
+        DecorPlugin,
     ));
     let map = voxel_mapgen::generate(seed);
     app.insert_resource(FocusedBiome(scenic_biome(&map)))
         .insert_resource(WorldMapResource(map))
         .insert_resource(InspectorState::new(seed))
         .insert_resource(CloudsEnabled(opts.clouds))
+        .insert_resource(DecorEnabled(opts.decor))
         .insert_resource(opts.beautify())
         .add_systems(EguiPrimaryContextPass, inspector::egui_inspector)
         .add_systems(

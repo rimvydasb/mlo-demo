@@ -47,6 +47,10 @@ enum Command {
         /// Enable the optional MICROHEIGHT beautification rule (A/B flag).
         #[arg(long)]
         microheight: bool,
+        /// Disable the fauna & flora decoration props (animated; use for
+        /// byte-stable output).
+        #[arg(long)]
+        no_decor: bool,
     },
 }
 
@@ -88,6 +92,7 @@ fn main() -> Result<()> {
             col,
             no_clouds,
             microheight,
+            no_decor,
         } => {
             let mut args = vec![
                 "run".to_string(),
@@ -112,6 +117,9 @@ fn main() -> Result<()> {
             }
             if microheight {
                 args.push("--microheight".into());
+            }
+            if no_decor {
+                args.push("--no-decor".into());
             }
             let status = std::process::Command::new("cargo").args(&args).status()?;
             anyhow::ensure!(status.success(), "screenshot command failed");

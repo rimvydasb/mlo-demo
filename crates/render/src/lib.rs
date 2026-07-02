@@ -3,11 +3,13 @@
 
 mod beautify;
 mod camera;
+pub mod decor;
 mod expansion;
 mod mesh;
 
 pub use beautify::{rule_hash01, BeautifyOptions};
 pub use camera::{CameraState, EguiWantsPointer, InspectorCamera};
+pub use decor::{plan_decor, DecorInstance, DecorKind, DecorModel};
 pub use expansion::{cell_column, expand, voxel_hash01, VoxelKind, VoxelVolume, SUB, VOX};
 pub use mesh::{base_color_linear, base_color_srgb, build_biome_meshes, BiomeMeshes, VOXEL_SIZE};
 
@@ -34,6 +36,8 @@ pub struct LayerCutoff(pub u8);
 pub struct SceneEntities {
     pub biome_meshes: Vec<Entity>,
     pub proxy_tiles: Vec<Entity>,
+    /// Fauna/flora prop roots on the focused biome (`voxel-app::decor`).
+    pub decorations: Vec<Entity>,
 }
 
 // ── Plugin ────────────────────────────────────────────────────────────────────

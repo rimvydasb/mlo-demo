@@ -18,7 +18,7 @@ cargo run -p native -- inspect --seed 42
 # Headless PNG screenshot (opens window briefly, then exits)
 cargo xtask screenshot --seed 42 --out shot.png
 cargo xtask screenshot --seed 42 --row 3 --col 5 --out shot.png   # specific biome
-cargo xtask screenshot --seed 42 --no-clouds --out shot.png       # byte-stable (clouds are non-deterministic)
+cargo xtask screenshot --seed 42 --no-clouds --no-decor --out shot.png  # byte-stable (clouds + decor animations are non-deterministic)
 cargo xtask screenshot --seed 42 --microheight --out shot.png     # A/B the optional MICROHEIGHT rule
 
 # ASCII top-down map dump (stdout, no window)
@@ -79,6 +79,20 @@ This is the load-bearing separation of the whole codebase (see `docs/rendering.m
   `render`.
 
 Snow is a `VoxelKind` only, **not** a `CellType`.
+
+## Fauna & Flora Decorations
+
+Decoration props (trees, palms, flowers, grass props, animals, fish — all cosmetic GLB models from Kenney packs) are
+split across three tiers (see `docs/rendering-fauna-flora.md`): `render/src/decor.rs` holds the catalog + the pure
+deterministic placement planner (`plan_decor`, cell-tier, unit-tested); `app/src/assets.rs` owns asset management
+(workspace `assets/` root via `asset_plugin()`, `DecorAssets` handles, palette harmonization of Kenney's teal foliage);
+`app/src/decor.rs` spawns/despawns instances with the scene rebuild and drives hop/swim transform animations. Runtime
+assets live in workspace-root `assets/models/{fauna,flora}/` — **never reference `imports/` at runtime**; it holds the
+raw source packs only. Bevy 0.19 loads glTF scenes as `WorldAsset` spawned via `WorldAssetRoot` (not `Scene`/
+`SceneRoot`). Placement invariants: palms on sand only, trees on soil (interior + local-flat), flowers/grass props on
+grass, fish submerged in surface water, animals never over water. Grass tops are guaranteed flat (GRASS TUFTS removed —
+FLAT TOPS contract) and the underground has no single-voxel air holes (pinhole seal) plus 0–2 hidden cave pockets per
+biome (`expansion.rs`).
 
 ## Coordinate Systems
 

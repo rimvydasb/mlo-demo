@@ -83,8 +83,9 @@ impl VoxelVolume {
 /// like natural terrain.
 ///
 /// Pipeline: base cell → voxel patterns, then the beautification passes
-/// (slopes, cliff fractures, optional microheight, retop, grass overhang,
-/// grass tufts — see `beautify`), then the underside erosion.
+/// (slopes, cliff fractures, optional microheight, retop, grass overhang —
+/// see `beautify`), then the underground passes: cave carving, underside
+/// erosion, and the pinhole seal (no single-voxel air holes underground).
 pub fn expand(
     grid: &CellGrid,
     cutoff: u8,
@@ -117,7 +118,9 @@ pub fn expand(
     let ctx = crate::beautify::BeautifyCtx::new(grid, cutoff, ox, oy, seed);
     crate::beautify::apply(&mut vol, &ctx, opts);
 
+    carve_caves(&mut vol, coord, seed);
     erode_underside(&mut vol, coord, seed);
+    seal_pinholes(&mut vol);
     vol
 }
 
@@ -174,6 +177,118 @@ pub fn voxel_hash01(seed: u64, wx: i64, wy: i64, wz: i64) -> f32 {
     h = h.wrapping_mul(0xff51afd7ed558ccd);
     h ^= h >> 33;
     (h >> 40) as f32 / (1u64 << 24) as f32
+}
+
+/// Top of the underground voxel band (voxel z below this is underground).
+const UNDERGROUND_TOP: usize = SURFACE_Z as usize * SUB;
+
+/// Rule discriminator for cave parameters (see `beautify::rule_hash01`; the
+/// beautify passes use 1–5, mapgen's beach pass uses 6).
+const RULE_CAVE: u64 = 8;
+
+/// Carve 0–2 deterministic ellipsoid cave pockets per biome into the
+/// underground mass. Caves are interior voids — invisible from outside until
+/// the layer peel (or a lucky erosion breach) exposes them, which is exactly
+/// the "mystery" they are for. They stay below the cell band directly under
+/// the surface (voxel z < 16), so the surface never loses its visual support,
+/// and they are voxel-tier only: the cell grid (mining, invariants) never
+/// changes.
+fn carve_caves(vol: &mut VoxelVolume, coord: BiomeCoord, seed: u64) {
+    let ox = coord.col as i64 * VOX as i64;
+    let oy = coord.row as i64 * VOX as i64;
+    // Per-biome, per-cave parameter hash: world offset + cave/param ids.
+    let param = |cave: u64, p: u64| {
+        crate::beautify::rule_hash01(seed, RULE_CAVE + cave * 16 + p, ox, oy, 0)
+    };
+
+    let count = (param(0, 0) * 3.0) as u64; // 0, 1, or 2 caves
+    for cave in 1..=count {
+        let rx = 3.0 + param(cave, 1) * 3.0; // lateral radii 3–6 voxels
+        let ry = 3.0 + param(cave, 2) * 3.0;
+        let rz = 2.0 + param(cave, 3) * 1.5; // flatter than wide, like real pockets
+                                             // Center: laterally well inside the biome, vertically inside the
+                                             // funnel mass but below the surface-support band (cap + margin ≤ 16).
+        let margin = 2.0;
+        let cx = rx + margin + param(cave, 4) * (VOX as f32 - 2.0 * (rx + margin));
+        let cy = ry + margin + param(cave, 5) * (VOX as f32 - 2.0 * (ry + margin));
+        let z_top = (4 * SUB) as f32 - rz; // cell z=4 stays untouched
+        let cz = rz + margin + param(cave, 6) * (z_top - rz - margin).max(0.0);
+
+        for z in 0..4 * SUB {
+            for y in 0..VOX {
+                for x in 0..VOX {
+                    let dx = (x as f32 + 0.5 - cx) / rx;
+                    let dy = (y as f32 + 0.5 - cy) / ry;
+                    let dz = (z as f32 + 0.5 - cz) / rz;
+                    if dx * dx + dy * dy + dz * dz < 1.0 {
+                        vol.set(x, y, z, VoxelKind::Air);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Fill single-voxel air pockets in the underground band until none remain:
+/// any air voxel with ≥5 solid face-neighbours (out-of-bounds counts as air)
+/// is refilled with its most common neighbour kind. This is the "no voxel
+/// holes" rule — the underside erosion nibbles voxel-by-voxel, and isolated
+/// one-voxel pits read as termite damage instead of weathering. Larger
+/// openings (erosion clusters, cave mouths, caves themselves) survive
+/// untouched. Runs to a fixpoint, so sealing one pinhole never leaves a new
+/// one behind.
+fn seal_pinholes(vol: &mut VoxelVolume) {
+    loop {
+        let mut fills: Vec<(usize, usize, usize, VoxelKind)> = Vec::new();
+        for z in 0..UNDERGROUND_TOP {
+            for y in 0..VOX {
+                for x in 0..VOX {
+                    if vol.get(x, y, z) != VoxelKind::Air {
+                        continue;
+                    }
+                    let (xi, yi, zi) = (x as i32, y as i32, z as i32);
+                    let neighbors = [
+                        vol.get_or_air(xi + 1, yi, zi),
+                        vol.get_or_air(xi - 1, yi, zi),
+                        vol.get_or_air(xi, yi + 1, zi),
+                        vol.get_or_air(xi, yi - 1, zi),
+                        vol.get_or_air(xi, yi, zi + 1),
+                        vol.get_or_air(xi, yi, zi - 1),
+                    ];
+                    let solid = neighbors.iter().filter(|k| k.is_opaque()).count();
+                    if solid >= 5 {
+                        fills.push((x, y, z, dominant_kind(&neighbors)));
+                    }
+                }
+            }
+        }
+        if fills.is_empty() {
+            break;
+        }
+        for (x, y, z, kind) in fills {
+            vol.set(x, y, z, kind);
+        }
+    }
+}
+
+/// Most common opaque kind among the given neighbours; ties break toward
+/// plain terrain (dirt, then stone) so sealing never mints extra ore voxels.
+fn dominant_kind(neighbors: &[VoxelKind; 6]) -> VoxelKind {
+    // `max_by_key` keeps the *last* maximum, so list preferred kinds last.
+    const ORDER: [VoxelKind; 7] = [
+        VoxelKind::Gold,
+        VoxelKind::Iron,
+        VoxelKind::Snow,
+        VoxelKind::Grass,
+        VoxelKind::Sand,
+        VoxelKind::Stone,
+        VoxelKind::Dirt,
+    ];
+    let count = |k| neighbors.iter().filter(|&&n| n == k).count();
+    ORDER
+        .into_iter()
+        .max_by_key(|&k| count(k))
+        .unwrap_or(VoxelKind::Dirt)
 }
 
 /// Nibble voxels off the exposed underground boundary so the floating island
@@ -273,11 +388,8 @@ mod tests {
         );
         let top = 2 * SUB + SUB - 1;
         assert_eq!(vol.get(20, 20, top), VoxelKind::Grass);
-        // Nothing above the cutoff except at most a 1-voxel grass tuft.
-        assert!(matches!(
-            vol.get(20, 20, 3 * SUB),
-            VoxelKind::Air | VoxelKind::Grass
-        ));
+        // Nothing above the cutoff — grass tops stay flat (FLAT TOPS).
+        assert_eq!(vol.get(20, 20, 3 * SUB), VoxelKind::Air);
         assert_eq!(vol.get(20, 20, 3 * SUB + 1), VoxelKind::Air);
     }
 
@@ -311,6 +423,77 @@ mod tests {
         // Below the snow band it stays bare stone even where locally exposed.
         let low_top = 8 * SUB + SUB - 1;
         assert_eq!(vol.get(25, 25, low_top), VoxelKind::Stone);
+    }
+
+    #[test]
+    fn no_single_voxel_air_holes_underground() {
+        // The "no voxel holes" rule: after erosion + sealing, no air voxel in
+        // the underground band may be a pinhole (≥5 solid face-neighbours).
+        // Checked over real generated biomes for coverage.
+        let map = voxel_mapgen::generate(42);
+        for row in 0..3u8 {
+            for col in 0..3u8 {
+                let coord = BiomeCoord::new(row, col);
+                let vol = expand(map.biome(coord), 12, coord, 42, BeautifyOptions::default());
+                for z in 0..UNDERGROUND_TOP {
+                    for y in 0..VOX {
+                        for x in 0..VOX {
+                            if vol.get(x, y, z) != VoxelKind::Air {
+                                continue;
+                            }
+                            let (xi, yi, zi) = (x as i32, y as i32, z as i32);
+                            let solid = [
+                                vol.get_or_air(xi + 1, yi, zi),
+                                vol.get_or_air(xi - 1, yi, zi),
+                                vol.get_or_air(xi, yi + 1, zi),
+                                vol.get_or_air(xi, yi - 1, zi),
+                                vol.get_or_air(xi, yi, zi + 1),
+                                vol.get_or_air(xi, yi, zi - 1),
+                            ]
+                            .iter()
+                            .filter(|k| k.is_opaque())
+                            .count();
+                            assert!(solid < 5, "pinhole at ({x},{y},{z}) in biome ({row},{col})");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn caves_stay_below_the_surface_support_band() {
+        // Caves may only remove voxels below cell z=4 (voxel z<16): the band
+        // directly under the surface keeps its visual support everywhere.
+        let mut solid = VoxelVolume::new();
+        for z in 0..VOX {
+            for y in 0..VOX {
+                for x in 0..VOX {
+                    solid.set(x, y, z, VoxelKind::Dirt);
+                }
+            }
+        }
+        let mut carved_any = false;
+        for row in 0..6u8 {
+            for col in 0..6u8 {
+                let mut vol = VoxelVolume::new();
+                vol.data.copy_from_slice(&solid.data);
+                carve_caves(&mut vol, BiomeCoord::new(row, col), 42);
+                for z in 0..VOX {
+                    for y in 0..VOX {
+                        for x in 0..VOX {
+                            let is_air = vol.get(x, y, z) == VoxelKind::Air;
+                            carved_any |= is_air;
+                            assert!(
+                                !(is_air && z >= 4 * SUB),
+                                "cave breached support band at ({x},{y},{z}) biome ({row},{col})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(carved_any, "no biome of seed 42 carved any cave");
     }
 
     #[test]

@@ -13,11 +13,15 @@
 //!    passes left as the new top, exactly like peeled terrain does.
 //! 5. GRASS OVERHANG — the grass top of a soil cell drapes one voxel down
 //!    every exposed side, the thin green rim from the reference art.
-//! 6. GRASS TUFTS — scattered single voxels above grass tops, breaking the
-//!    flat top plane.
 //!
-//! Subtract first, then repaint, then add: overhang and tufts must see the
-//! already-carved top or they would decorate voxels that no longer exist.
+//! FLAT TOPS contract: nothing ever writes above a cell's own top plane —
+//! interior grass fields stay flat so fauna & flora props can stand on them.
+//! (The old GRASS TUFTS rule added single voxels above grass tops; they read
+//! as pimples and were replaced by real grass/flower props — see
+//! docs/rendering-fauna-flora.md.)
+//!
+//! Subtract first, then repaint, then add: overhang must see the
+//! already-carved top or it would decorate voxels that no longer exist.
 //!
 //! Every random choice is `rule_hash01` on world voxel coordinates with a
 //! per-rule discriminator — same seed, same terrain, on every platform.
@@ -40,7 +44,6 @@ pub struct BeautifyOptions {
 const RULE_CLIFF: u64 = 1;
 const RULE_SLOPE: u64 = 2;
 const RULE_MICRO: u64 = 3;
-const RULE_TUFT: u64 = 5;
 
 /// `voxel_hash01` with a rule discriminator folded into the seed — the
 /// "determinism seed formula" from rendering.md. Mirrors mapgen's
@@ -106,7 +109,6 @@ pub(crate) fn apply(vol: &mut VoxelVolume, ctx: &BeautifyCtx, opts: BeautifyOpti
     }
     retop(vol, ctx);
     grass_overhang(vol, ctx);
-    grass_tufts(vol, ctx);
 }
 
 // ── Voxel column helpers ──────────────────────────────────────────────────────
@@ -319,34 +321,6 @@ fn grass_overhang(vol: &mut VoxelVolume, ctx: &BeautifyCtx) {
     });
 }
 
-// ── GRASS TUFTS ───────────────────────────────────────────────────────────────
-
-/// Scattered single grass voxels one level above grass tops (~8% of
-/// columns — the spec's 15% read as noise against the color jitter, tuned
-/// down after A/B against the reference art). Never taller than 1 — higher
-/// reads as bushes, and bushes are decoration props, not voxels.
-fn grass_tufts(vol: &mut VoxelVolume, ctx: &BeautifyCtx) {
-    for_top_cells(ctx, &[CellType::Soil], |x, y, z| {
-        for dy in 0..SUB {
-            for dx in 0..SUB {
-                let (vx, vy) = (x as usize * SUB + dx, y as usize * SUB + dy);
-                if ctx.hash(RULE_TUFT, vx, vy, z as usize * SUB) <= 0.92 {
-                    continue;
-                }
-                let Some(t) = cell_col_top(vol, vx, vy, z) else {
-                    continue;
-                };
-                if vol.get(vx, vy, t) == VoxelKind::Grass
-                    && t + 1 < VOX
-                    && vol.get(vx, vy, t + 1) == VoxelKind::Air
-                {
-                    vol.set(vx, vy, t + 1, VoxelKind::Grass);
-                }
-            }
-        }
-    });
-}
-
 // ── Iteration helper ──────────────────────────────────────────────────────────
 
 /// Visit every top-exposed cell (air above, peel-aware) of the given types.
@@ -427,29 +401,19 @@ mod tests {
     }
 
     #[test]
-    fn grass_tufts_cover_roughly_8_percent() {
+    fn grass_tops_are_flat() {
+        // FLAT TOPS contract: fauna & flora props stand on grass, so nothing
+        // may poke above a flat field's top plane (the old GRASS TUFTS rule
+        // left single-voxel pimples here).
         let vol = expand(&flat_soil_grid(), 12, BiomeCoord::new(0, 0), 42, OPTS);
-        // Interior columns only — the rim is carved by slopes/cliffs.
-        let tuft_z = SURFACE_Z as usize * SUB + SUB; // one above the grass top
-        let mut tufts = 0;
-        let mut total = 0;
-        for vy in SUB..VOX - SUB {
-            for vx in SUB..VOX - SUB {
-                total += 1;
-                if vol.get(vx, vy, tuft_z) == VoxelKind::Grass {
-                    tufts += 1;
-                }
-            }
-        }
-        let pct = tufts as f32 / total as f32;
-        assert!(
-            (0.03..=0.16).contains(&pct),
-            "tuft coverage {pct} outside 3–16%"
-        );
-        // Never taller than one voxel.
+        let above = SURFACE_Z as usize * SUB + SUB; // one above the grass top
         for vy in 0..VOX {
             for vx in 0..VOX {
-                assert_eq!(vol.get(vx, vy, tuft_z + 1), VoxelKind::Air);
+                assert_eq!(
+                    vol.get(vx, vy, above),
+                    VoxelKind::Air,
+                    "pimple above flat grass at ({vx},{vy})"
+                );
             }
         }
     }

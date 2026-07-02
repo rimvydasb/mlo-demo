@@ -6,6 +6,15 @@ WebAssembly + wgpu (web). Future: iOS. Development is LLM-assisted (Claude CLI) 
 This document describes the **implemented** Phase 1 terrain renderer (see `crates/render`, `crates/mapgen`) plus the
 agreed design direction for later phases. Sections marked _future scope_ are not implemented yet.
 
+**Change log — v0.5.** Decoration props are now **implemented** — see the companion spec `rendering-fauna-flora.md`
+(trees, palms, flowers, grass props, animals, fish; curated `assets/` pipeline). Terrain changes shipped alongside:
+**GRASS TUFTS removed** (the single-voxel tufts read as pimples on flat fields; grass props replace them — the new
+**FLAT TOPS** contract says nothing ever writes above a cell's own top plane, so fauna & flora can stand on grass); the
+underside erosion gained a **pinhole seal** (no single-voxel air holes underground — isolated one-voxel pits read as
+termite damage; air voxels with ≥5 solid face-neighbours are refilled to a fixpoint) and deterministic **cave pockets**
+(0–2 interior ellipsoid voids per biome, below the surface-support band, visible only through the layer peel or an
+erosion breach).
+
 **Change log — v0.4.** Terrain Beautification Rules are now **implemented**: CLIFF FRACTURES, SLOPES, GRASS OVERHANG,
 GRASS TUFTS, MICROHEIGHT (render tier, `render/src/beautify.rs`); BEACHES (mapgen tier, `mapgen/src/beach_pass.rs`);
 CLOUDS (scene tier, `app/src/clouds.rs`). Implementation notes: the render rules run as ordered volume passes with a
@@ -30,9 +39,9 @@ reference); `sample2.jpg` is a distinct piece. Together they set the visual targ
   notably — an eroded, jagged underside where the dirt breaks apart into loose gray stone chunks.
 
 **Style decision (resolved):** **terrain** (ground, relief, water) is true cell-voxel geometry — axis-aligned unit cubes
-per `sample2`'s language, produced by the `cell → 4×4×4 voxel` expansion. **Props** (trees, bushes, buildings) will be
-imported 3D models placed on top of the terrain — _future scope_, see "Decoration Props" below. The floating island's
-jagged underside comes from procedural voxel erosion, per `sample2`.
+per `sample2`'s language, produced by the `cell → 4×4×4 voxel` expansion. **Props** (trees, animals, later buildings)
+are imported 3D models placed on top of the terrain — implemented for fauna & flora, see "Decoration Props" below and
+`rendering-fauna-flora.md`. The floating island's jagged underside comes from procedural voxel erosion, per `sample2`.
 
 ---
 
@@ -179,6 +188,18 @@ funnel this turns clean cell-sized steps into the ragged rubble underside of `sa
 coordinate + seed (`voxel_hash01`), so screenshots are stable. This is render-side cosmetics: it never touches `mapgen`
 data or its invariant tests.
 
+Two underground passes bracket the erosion (both render-tier, deterministic, v0.5):
+
+- **Cave pockets** (before erosion): 0–2 ellipsoid voids per biome (lateral radii 3–6 voxels, flatter than wide), carved
+  into the underground mass strictly below the cell band under the surface (voxel z < 16), so the surface never loses
+  visual support. Interior-only — visible through the layer peel or where erosion breaches a thin wall, which is the
+  intended "mystery" effect. Parameters hash off the biome's world offset (`RULE_CAVE` block, ids 8–46).
+- **Pinhole seal** (after erosion): the "no voxel holes" rule. Any underground air voxel with ≥ 5 solid face-neighbours
+  is refilled with its most common neighbour kind (ties break toward dirt/stone so sealing never mints ore voxels),
+  repeated to a fixpoint. Erosion nibbles voxel-by-voxel and isolated one-voxel pits read as termite damage; sealing
+  them leaves only clustered, weathered-looking openings. Enforced by the `no_single_voxel_air_holes_underground` test
+  over generated biomes.
+
 ---
 
 ## Terrain Beautification Rules (implemented)
@@ -198,7 +219,7 @@ and mixing tiers breaks headless testing.
 | CLIFF FRACTURES | render — expansion | `render`     | expansion returns fewer voxels on exposed side faces | no                        |
 | SLOPES          | render — expansion | `render`     | expansion returns fewer voxels toward lower neighbor | no                        |
 | GRASS OVERHANG  | render — expansion | `render`     | expansion writes grass voxels on side faces          | no                        |
-| GRASS TUFTS     | render — expansion | `render`     | expansion adds ≤1 voxel above top layer              | no                        |
+| ~~GRASS TUFTS~~ | render — expansion | `render`     | **removed in v0.5** — see FLAT TOPS note below       | no                        |
 | MICROHEIGHT     | render — expansion | `render`     | expansion drops top-layer voxels per (vx, vy) hash   | no                        |
 | BEACHES         | mapgen — post-pass | `mapgen`     | new `beach_pass.rs` after `interior.rs`              | **yes** — flips cell type |
 | CLOUDS          | app — scene system | `app`        | Bevy `Update` system on instanced quads              | no                        |
@@ -233,13 +254,19 @@ flowchart TD
     Cliff --> Micro["MICROHEIGHT (--microheight): drop top-layer voxels per (vx, vy) hash"]
     Micro --> Retop["RETOP: regrow grass tops / snow caps on carved columns"]
     Retop --> Overhang["GRASS OVERHANG: paint grass on the top row of side faces"]
-    Overhang --> Tufts["GRASS TUFTS: add ≤1 voxel above top grass layer"]
-    Tufts --> Erode["Underside erosion (existing, unchanged)"]
-    Erode --> Mesher["Mesher: face culling + AO + jitter"]
+    Overhang --> Caves["Cave pockets (v0.5)"]
+    Caves --> Erode["Underside erosion"]
+    Erode --> Seal["Pinhole seal (v0.5)"]
+    Seal --> Mesher["Mesher: face culling + AO + jitter"]
 ```
 
 Base pattern first (what the cell _is_), then subtract (SLOPES, CLIFFS, MICROHEIGHT — nothing is added yet, so overhang
-and tufts see the already-carved top), then repaint (RETOP), then add (OVERHANG, TUFTS).
+sees the already-carved top), then repaint (RETOP), then add (OVERHANG).
+
+**FLAT TOPS (v0.5).** Nothing ever writes above a cell's own top plane, so wide grass fields stay flat — fauna & flora
+props stand on them (`rendering-fauna-flora.md`). This retired GRASS TUFTS, whose scattered single voxels read as
+pimples on flat terrain; the visual variation it provided now comes from the per-voxel color jitter plus real grass/bush
+props. Enforced by the `grass_tops_are_flat` test.
 
 ### Determinism seed formula
 
@@ -249,9 +276,10 @@ Every "random" choice inside beautification uses the same hash, with a rule disc
 voxel_hash01(seed, bx, by, cx, cy, cz, vx, vy, vz, RULE_ID) -> f32 in [0, 1)
 ```
 
-`RULE_ID` is a small integer constant per rule (`RULE_CLIFF = 1`, `RULE_SLOPE = 2`, `RULE_MICRO = 3`, `RULE_TUFT = 5`,
-`RULE_BEACH = 6`). Without the discriminator, two rules would draw correlated numbers at the same voxel and produce
-artifacts. Implemented as `rule_hash01` (`render/src/beautify.rs`), which folds the rule id into the seed of the
+`RULE_ID` is a small integer constant per rule (`RULE_CLIFF = 1`, `RULE_SLOPE = 2`, `RULE_MICRO = 3`, `RULE_BEACH = 6`,
+`RULE_CAVE` block = 8–46; id 5 was the removed GRASS TUFTS and stays reserved; the decoration planner owns 64+ — see
+`rendering-fauna-flora.md`). Without the discriminator, two rules would draw correlated numbers at the same voxel and
+produce artifacts. Implemented as `rule_hash01` (`render/src/beautify.rs`), which folds the rule id into the seed of the
 existing stable, cross-platform `voxel_hash01`; mapgen's beach pass carries its own copy of the same mixer
 (`cell_hash01`) so it stays engine-free. GRASS OVERHANG and RETOP are fully determined by geometry and draw no random
 numbers.
@@ -308,19 +336,12 @@ _Note on the earlier "OVERLAPS" description._ The v0.2 spec described overlaps a
 neighboring soil cell's box. That worked visually but broke the "each cell owns its own 4³ box" contract, which the
 mesher relies on. The face-paint version above gets the same look without that break.
 
-#### GRASS TUFTS (render)
+#### GRASS TUFTS (render) — **removed in v0.5**
 
-_Purpose:_ scattered small grass points on top of grass surfaces, breaking the flat top plane. Subtle — you notice their
-absence more than their presence.
-
-_Rule:_ for each `(vx, vy)` voxel column on top of a grass-topped soil cell, if the hash is above a threshold, add a
-single `grass` voxel one level above the top row. Never more than 1 voxel tall (higher and they read as bushes, not
-tufts — and bushes are decoration props, not voxels). _Tuning note:_ the spec's 15% coverage read as noise on top of the
-color jitter; shipped at threshold 0.92 → ~8% coverage after A/B against the reference art.
-
-_Applies to:_ soil with grass top only.
-
-_Ordering step:_ 6 (last — nothing else operates on the +1 layer above the cell top).
+Shipped in v0.4 (single grass voxels one level above ~8% of grass tops), removed in v0.5: on wide flat fields the tufts
+read as pimples, and the FLAT TOPS contract (fauna & flora props stand on grass) forbids anything above a cell's top
+plane. The nature-kit `grass` / `grass_large` / `plant_bushSmall` props took over the "break the flat plane" job — see
+`rendering-fauna-flora.md`. The retired `RULE_TUFT = 5` id stays reserved so hashes of other rules never shift.
 
 #### MICROHEIGHT (render)
 
@@ -461,13 +482,13 @@ Water material: white base at alpha 0.72, `AlphaMode::Blend`, low roughness for 
   the same `cell_column` function the mesher uses.
 - **Exports:** ASCII dump (macro map + surface + relief heights + all underground layers) and PNG screenshot.
 
-## Decoration Props (imported 3D assets, _future scope_)
+## Decoration Props (imported 3D assets)
 
-Trees, bushes, and era-driven buildings are **imported 3D models (glTF/GLB), not composed from cell voxels** — curved
-roofs and rounded canopies rule out voxel composition. They will be placed on top of the voxel terrain by `render`/`app`
-via Bevy's `AssetServer`, separate from the procedural mesher. Whether placement is seeded by biome coordinate or purely
-cosmetic is an open question. None of this is required for Phase 1 terrain rendering; documented so the prop pipeline
-has a landing spot.
+**Implemented for fauna & flora** — trees, palms, flowers, grass props, animals, and fish are imported GLB models placed
+on top of the voxel terrain, with deterministic seeded placement (the "seeded by biome coordinate" option won). The full
+spec lives in **`rendering-fauna-flora.md`**: catalog, placement rules, densities, animation, the curated `assets/`
+pipeline, and the planner/assets/scene architecture split. Era-driven buildings remain _future scope_ and will extend
+the same pipeline.
 
 Stretch goals from the reference art, also future scope: pockmark detail on rock faces, lighter rim/foam tone at water
 edges, and the water-edge "vortex" slope transition from the original spec's Phase III.

@@ -5,6 +5,7 @@ use voxel_render::{
     base_color_srgb, cell_column, EguiWantsPointer, FocusedBiome, LayerCutoff, VoxelKind, SUB,
 };
 
+use crate::decor::DecorEnabled;
 use crate::state::{InspectorState, WorldMapResource};
 
 fn biome_char(bt: BiomeType) -> char {
@@ -23,6 +24,7 @@ pub fn egui_inspector(
     mut focused: ResMut<FocusedBiome>,
     mut cutoff: ResMut<LayerCutoff>,
     mut egui_wants: ResMut<EguiWantsPointer>,
+    mut decor_enabled: ResMut<DecorEnabled>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
 
@@ -77,6 +79,10 @@ pub fn egui_inspector(
                 .changed()
             {
                 cutoff.0 = cut as u8;
+            }
+            let mut decor_on = decor_enabled.0;
+            if ui.checkbox(&mut decor_on, "Fauna & flora").changed() {
+                decor_enabled.0 = decor_on;
             }
             ui.separator();
 

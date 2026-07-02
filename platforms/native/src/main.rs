@@ -17,6 +17,10 @@ struct Presentation {
     /// Enable the optional MICROHEIGHT beautification rule (A/B flag).
     #[arg(long)]
     microheight: bool,
+    /// Disable the fauna & flora decoration props (their idle animations are
+    /// time-based; use this for byte-stable screenshots).
+    #[arg(long)]
+    no_decor: bool,
 }
 
 impl From<Presentation> for voxel_app::AppOptions {
@@ -24,6 +28,7 @@ impl From<Presentation> for voxel_app::AppOptions {
         Self {
             clouds: !p.no_clouds,
             microheight: p.microheight,
+            decor: !p.no_decor,
         }
     }
 }

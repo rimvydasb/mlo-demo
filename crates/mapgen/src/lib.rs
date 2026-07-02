@@ -1,21 +1,31 @@
+//! Procedural world generation, cell tier only.
+//!
+//! `generate(seed)` runs two passes:
+//! 1. **Macro pass** — assigns a `BiomeType` to each of the 36 biomes and
+//!    computes edge `Connection`s (compatible = same type on both sides).
+//! 2. **Interior pass** — fills each biome's 12³ `CellGrid` from world-space
+//!    noise so fields continue seamlessly across borders.
+//!
+//! No Bevy, no voxels: the cosmetic cell → voxel expansion lives in `render`.
+
 mod ascii;
 mod interior;
 mod macro_pass;
 
 use std::collections::BTreeMap;
-use voxel_core::{BiomeCoord, BiomeType, Connection, EdgeDir, Seed, VoxelGrid};
+use voxel_core::{BiomeCoord, BiomeType, CellGrid, Connection, EdgeDir, Seed, WORLD_BIOMES};
 
 pub use ascii::{ascii_dump, ascii_macro};
 
 pub struct WorldMap {
-    pub biome_types: [[BiomeType; 6]; 6],
-    biomes: Vec<VoxelGrid>,
+    pub biome_types: [[BiomeType; WORLD_BIOMES]; WORLD_BIOMES],
+    biomes: Vec<CellGrid>,
     pub connections: BTreeMap<(BiomeCoord, EdgeDir), Connection>,
 }
 
 impl WorldMap {
-    pub fn biome(&self, coord: BiomeCoord) -> &VoxelGrid {
-        &self.biomes[coord.row as usize * 6 + coord.col as usize]
+    pub fn biome(&self, coord: BiomeCoord) -> &CellGrid {
+        &self.biomes[coord.row as usize * WORLD_BIOMES + coord.col as usize]
     }
 
     pub fn biome_type(&self, coord: BiomeCoord) -> BiomeType {
@@ -31,23 +41,25 @@ pub fn generate(seed: Seed) -> WorldMap {
     use rand::SeedableRng;
     use rand_chacha::ChaCha8Rng;
 
+    // The RNG feeds the macro pass only; the interior pass uses seed-derived
+    // noise in world coordinates, so biome order can never affect output.
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
     let biome_types = macro_pass::assign_biome_types(&mut rng);
     let connections = macro_pass::compute_connections(&biome_types);
 
-    let mut biomes = Vec::with_capacity(36);
-    for row in 0..6u8 {
-        for col in 0..6u8 {
+    let mut biomes = Vec::with_capacity(WORLD_BIOMES * WORLD_BIOMES);
+    for row in 0..WORLD_BIOMES as u8 {
+        for col in 0..WORLD_BIOMES as u8 {
             let coord = BiomeCoord::new(row, col);
             let bt = biome_types[row as usize][col as usize];
-            let north = row.checked_sub(1).map(|r| biome_types[r as usize][col as usize]);
-            let south = if row < 5 { Some(biome_types[row as usize + 1][col as usize]) } else { None };
-            let west  = col.checked_sub(1).map(|c| biome_types[row as usize][c as usize]);
-            let east  = if col < 5 { Some(biome_types[row as usize][col as usize + 1]) } else { None };
-            biomes.push(interior::generate_biome(seed, coord, bt, north, south, west, east));
+            biomes.push(interior::generate_biome(seed, coord, bt));
         }
     }
 
-    WorldMap { biome_types, biomes, connections }
+    WorldMap {
+        biome_types,
+        biomes,
+        connections,
+    }
 }

@@ -1,121 +1,263 @@
-use bevy::prelude::*;
-use bevy::asset::RenderAssetUsages;
-use bevy::render::mesh::{Indices, PrimitiveTopology};
-use voxel_core::{BiomeType, ElementId, Material, Voxel, VoxelGrid};
-use std::collections::HashMap;
+//! Voxel volume → Bevy meshes.
+//!
+//! One opaque mesh (all solid voxels) plus one translucent water mesh per
+//! biome. Both use per-vertex colors (`Mesh::ATTRIBUTE_COLOR`, fully
+//! supported by `StandardMaterial` in Bevy 0.19), which lets us bake:
+//!
+//! - per-voxel color jitter (hashed from world voxel coords — deterministic),
+//! - classic 3-neighbour ambient occlusion per vertex,
+//!
+//! into a single mesh with a single white material, instead of one mesh per
+//! flat color.
 
-// Face definitions: (voxel-space neighbor offset, world-space normal, 4 world-space vertex offsets)
-// World mapping: voxel (vx,vy,vz) → world (vx, vz, vy) — voxel-Z is world-Y (up)
-const FACE_DEFS: &[([i32; 3], [f32; 3], [[f32; 3]; 4])] = &[
-    ([1, 0, 0],  [1., 0., 0.],  [[1.,0.,0.],[1.,0.,1.],[1.,1.,1.],[1.,1.,0.]]), // +X east
-    ([-1,0, 0],  [-1.,0., 0.],  [[0.,0.,1.],[0.,0.,0.],[0.,1.,0.],[0.,1.,1.]]), // -X west
-    ([0, 0, 1],  [0., 1., 0.],  [[0.,1.,0.],[0.,1.,1.],[1.,1.,1.],[1.,1.,0.]]), // +Y top (dvz=+1)
-    ([0, 0,-1],  [0.,-1., 0.],  [[1.,0.,1.],[0.,0.,1.],[0.,0.,0.],[1.,0.,0.]]), // -Y bottom
-    ([0, 1, 0],  [0., 0., 1.],  [[1.,0.,1.],[0.,0.,1.],[0.,1.,1.],[1.,1.,1.]]), // +Z south (dvy=+1)
-    ([0,-1, 0],  [0., 0.,-1.],  [[0.,0.,0.],[1.,0.,0.],[1.,1.,0.],[0.,1.,0.]]), // -Z north
+use bevy::asset::RenderAssetUsages;
+use bevy::prelude::*;
+use bevy::render::mesh::{Indices, PrimitiveTopology};
+use voxel_core::BiomeCoord;
+
+use crate::expansion::{voxel_hash01, VoxelKind, VoxelVolume, SUB, VOX};
+
+/// World-space edge length of one voxel (1 cell = 1.0 world unit).
+pub const VOXEL_SIZE: f32 = 1.0 / SUB as f32;
+
+pub struct BiomeMeshes {
+    pub opaque: Option<Mesh>,
+    pub water: Option<Mesh>,
+}
+
+/// Voxel-space face table. World mapping is applied at emit time:
+/// voxel (x, y, z) → world (x, z, y), i.e. voxel-Z is world-up.
+/// `corners` are listed so the emitted world-space winding is CCW from
+/// outside (the voxel→world axis swap flips handedness, which this
+/// ordering already accounts for).
+struct Face {
+    normal_v: [i32; 3],
+    corners: [[i32; 3]; 4],
+}
+
+const FACES: [Face; 6] = [
+    // +X (world east)
+    Face {
+        normal_v: [1, 0, 0],
+        corners: [[1, 0, 0], [1, 0, 1], [1, 1, 1], [1, 1, 0]],
+    },
+    // -X (world west)
+    Face {
+        normal_v: [-1, 0, 0],
+        corners: [[0, 1, 0], [0, 1, 1], [0, 0, 1], [0, 0, 0]],
+    },
+    // +Y (world south, toward +Z world)
+    Face {
+        normal_v: [0, 1, 0],
+        corners: [[1, 1, 0], [1, 1, 1], [0, 1, 1], [0, 1, 0]],
+    },
+    // -Y (world north)
+    Face {
+        normal_v: [0, -1, 0],
+        corners: [[0, 0, 0], [0, 0, 1], [1, 0, 1], [1, 0, 0]],
+    },
+    // +Z (world up)
+    Face {
+        normal_v: [0, 0, 1],
+        corners: [[0, 0, 1], [0, 1, 1], [1, 1, 1], [1, 0, 1]],
+    },
+    // -Z (world down)
+    Face {
+        normal_v: [0, 0, -1],
+        corners: [[1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 0]],
+    },
 ];
 
-type GroupData = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>);
+#[derive(Default)]
+struct Buffers {
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    colors: Vec<[f32; 4]>,
+    indices: Vec<u32>,
+}
 
-/// Build one mesh per unique voxel color; returns (Mesh, [r, g, b]) pairs.
-/// Caller creates one StandardMaterial per pair using Color::srgb(r, g, b).
-pub fn build_voxel_meshes(grid: &VoxelGrid, layer_cutoff: u8) -> Vec<(Mesh, [f32; 3])> {
-    // key: bit-pattern of rgb floats; value: (rgb, geometry buffers)
-    let mut groups: HashMap<[u8; 12], ([f32; 3], GroupData)> = HashMap::new();
+impl Buffers {
+    fn into_mesh(self) -> Option<Mesh> {
+        if self.positions.is_empty() {
+            return None;
+        }
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::default(),
+        );
+        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, self.positions);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, self.normals);
+        mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, self.colors);
+        mesh.insert_indices(Indices::U32(self.indices));
+        Some(mesh)
+    }
+}
 
-    for vz in 0u8..12 {
-        if vz >= layer_cutoff { continue; }
-        for vy in 0u8..12 {
-            for vx in 0u8..12 {
-                let voxel = grid.get(vx, vy, vz);
-                if voxel.material == Material::Air { continue; }
+pub fn build_biome_meshes(vol: &VoxelVolume, coord: BiomeCoord, seed: u64) -> BiomeMeshes {
+    let mut opaque = Buffers::default();
+    let mut water = Buffers::default();
 
-                let wx = vx as f32;
-                let wy = vz as f32; // voxel-Z → world-Y (up)
-                let wz = vy as f32; // voxel-Y → world-Z
+    let ox = coord.col as i64 * VOX as i64;
+    let oy = coord.row as i64 * VOX as i64;
 
-                let [r, g, b, _] = voxel_color(voxel);
-                let key = color_key([r, g, b]);
+    for z in 0..VOX {
+        for y in 0..VOX {
+            for x in 0..VOX {
+                let kind = vol.get(x, y, z);
+                if kind == VoxelKind::Air {
+                    continue;
+                }
+                let is_water = kind == VoxelKind::Water;
 
-                for &([dvx, dvy, dvz], normal, vert_offs) in FACE_DEFS {
-                    let nx = vx as i32 + dvx;
-                    let ny = vy as i32 + dvy;
-                    let nz = vz as i32 + dvz;
+                // Deterministic per-voxel value jitter.
+                let h = voxel_hash01(seed, ox + x as i64, oy + y as i64, z as i64);
+                let jitter = 1.0 - jitter_amount(kind) * (h - 0.5) * 2.0;
+                let base = base_color_linear(kind);
+                let rgb = [base[0] * jitter, base[1] * jitter, base[2] * jitter];
 
-                    let nb_air = if nx < 0 || ny < 0 || nz < 0
-                                    || nx >= 12 || ny >= 12 || nz >= 12
-                    {
-                        true
+                let p = [x as i32, y as i32, z as i32];
+                for face in &FACES {
+                    let n = face.normal_v;
+                    let neighbor = vol.get_or_air(p[0] + n[0], p[1] + n[1], p[2] + n[2]);
+                    let visible = if is_water {
+                        // Water renders only against air; faces shared with
+                        // solids or other water stay hidden.
+                        neighbor == VoxelKind::Air
                     } else {
-                        let nb = grid.get(nx as u8, ny as u8, nz as u8);
-                        nb.material == Material::Air || (nz as u8) >= layer_cutoff
+                        !neighbor.is_opaque()
                     };
-                    if !nb_air { continue; }
-
-                    let (_, (positions, normals, uvs, indices)) = groups
-                        .entry(key)
-                        .or_insert_with(|| ([r, g, b], (vec![], vec![], vec![], vec![])));
-
-                    let base = positions.len() as u32;
-                    for [dx, dy, dz] in vert_offs {
-                        positions.push([wx + dx, wy + dy, wz + dz]);
-                        normals.push(normal);
-                        uvs.push([dx, dz]);
+                    if !visible {
+                        continue;
                     }
-                    indices.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
+
+                    let buf = if is_water { &mut water } else { &mut opaque };
+                    emit_face(buf, vol, p, face, rgb, is_water);
                 }
             }
         }
     }
 
-    groups.into_values().map(|(color, (positions, normals, uvs, indices))| {
-        let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
-        mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-        mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
-        mesh.insert_indices(Indices::U32(indices));
-        (mesh, color)
-    }).collect()
-}
-
-fn color_key(rgb: [f32; 3]) -> [u8; 12] {
-    let mut key = [0u8; 12];
-    for (i, f) in rgb.iter().enumerate() {
-        key[i*4..(i+1)*4].copy_from_slice(&f.to_bits().to_le_bytes());
+    BiomeMeshes {
+        opaque: opaque.into_mesh(),
+        water: water.into_mesh(),
     }
-    key
 }
 
-pub fn proxy_material_color(bt: BiomeType) -> LinearRgba {
-    let (r, g, b) = match bt {
-        BiomeType::Grass => (0.15, 0.45, 0.15),
-        BiomeType::Sand  => (0.60, 0.55, 0.35),
-        BiomeType::Water => (0.10, 0.25, 0.60),
-        BiomeType::Rock  => (0.35, 0.35, 0.35),
+fn emit_face(
+    buf: &mut Buffers,
+    vol: &VoxelVolume,
+    p: [i32; 3],
+    face: &Face,
+    rgb: [f32; 3],
+    is_water: bool,
+) {
+    let n = face.normal_v;
+    // Voxel-space tangent axes of this face's plane.
+    let axis = n.iter().position(|&c| c != 0).unwrap();
+    let (u_axis, v_axis) = ((axis + 1) % 3, (axis + 2) % 3);
+
+    let base = buf.positions.len() as u32;
+    let mut ao = [1.0f32; 4];
+
+    for (i, corner) in face.corners.iter().enumerate() {
+        // World position: voxel (x, y, z) → world (x, z, y), scaled.
+        let vx = (p[0] + corner[0]) as f32;
+        let vy = (p[1] + corner[1]) as f32;
+        let vz = (p[2] + corner[2]) as f32;
+        buf.positions
+            .push([vx * VOXEL_SIZE, vz * VOXEL_SIZE, vy * VOXEL_SIZE]);
+        buf.normals.push([n[0] as f32, n[2] as f32, n[1] as f32]);
+
+        let occ = if is_water {
+            1.0
+        } else {
+            corner_ao(vol, p, n, axis, u_axis, v_axis, *corner)
+        };
+        ao[i] = occ;
+        let alpha = 1.0;
+        buf.colors
+            .push([rgb[0] * occ, rgb[1] * occ, rgb[2] * occ, alpha]);
+    }
+
+    // Flip the quad diagonal where it makes AO interpolate more smoothly.
+    if ao[0] + ao[2] >= ao[1] + ao[3] {
+        buf.indices
+            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    } else {
+        buf.indices
+            .extend_from_slice(&[base + 1, base + 2, base + 3, base + 1, base + 3, base]);
+    }
+}
+
+/// Classic voxel AO: for a face corner, occlusion from the two edge
+/// neighbours and the diagonal neighbour in the plane one step along the
+/// face normal.
+fn corner_ao(
+    vol: &VoxelVolume,
+    p: [i32; 3],
+    n: [i32; 3],
+    axis: usize,
+    u_axis: usize,
+    v_axis: usize,
+    corner: [i32; 3],
+) -> f32 {
+    // Corner offsets 0/1 → neighbour direction -1/+1 on each tangent axis.
+    let su = corner[u_axis] * 2 - 1;
+    let sv = corner[v_axis] * 2 - 1;
+
+    let mut side1 = p;
+    side1[axis] += n[axis];
+    let mut side2 = side1;
+    let mut diag = side1;
+    side1[u_axis] += su;
+    side2[v_axis] += sv;
+    diag[u_axis] += su;
+    diag[v_axis] += sv;
+
+    let occludes = |q: [i32; 3]| vol.get_or_air(q[0], q[1], q[2]).is_opaque();
+    let (s1, s2) = (occludes(side1), occludes(side2));
+    let level = if s1 && s2 {
+        3
+    } else {
+        s1 as u8 + s2 as u8 + occludes(diag) as u8
     };
-    LinearRgba::new(r, g, b, 1.0)
+    [1.0, 0.82, 0.66, 0.5][level as usize]
 }
 
-fn voxel_color(voxel: Voxel) -> [f32; 4] {
-    if let Some(e) = voxel.element {
-        return element_color(e);
-    }
-    match voxel.material {
-        Material::Air                          => [0., 0., 0., 0.],
-        Material::Ground(BiomeType::Grass)     => [0.22, 0.68, 0.22, 1.],
-        Material::Ground(BiomeType::Sand)      => [0.88, 0.78, 0.50, 1.],
-        Material::Ground(BiomeType::Water)     => [0.12, 0.42, 0.88, 1.],
-        Material::Ground(BiomeType::Rock)      => [0.52, 0.52, 0.52, 1.],
-        Material::Underground                  => [0.33, 0.22, 0.14, 1.],
+fn jitter_amount(kind: VoxelKind) -> f32 {
+    match kind {
+        VoxelKind::Air => 0.0,
+        VoxelKind::Grass => 0.13,
+        VoxelKind::Dirt => 0.10,
+        VoxelKind::Sand => 0.06,
+        VoxelKind::Water => 0.04,
+        VoxelKind::Stone => 0.14,
+        VoxelKind::Gold => 0.18,
+        VoxelKind::Iron => 0.14,
+        VoxelKind::Snow => 0.03,
     }
 }
 
-fn element_color(e: ElementId) -> [f32; 4] {
-    match e {
-        ElementId::Stone    => [0.60, 0.60, 0.60, 1.],
-        ElementId::Sand     => [0.92, 0.84, 0.58, 1.],
-        ElementId::Iron     => [0.72, 0.40, 0.20, 1.],
-        ElementId::Crystal  => [0.42, 0.82, 0.92, 1.],
-        ElementId::Obsidian => [0.12, 0.06, 0.18, 1.],
+/// Palette in sRGB, tuned against docs/reference/*.jpg. The inspector's
+/// preview panel reads this directly; the mesher converts to linear.
+pub fn base_color_srgb(kind: VoxelKind) -> [f32; 3] {
+    match kind {
+        VoxelKind::Air => [0.0, 0.0, 0.0],
+        VoxelKind::Grass => [0.36, 0.70, 0.22],
+        VoxelKind::Dirt => [0.56, 0.36, 0.22],
+        VoxelKind::Sand => [0.89, 0.80, 0.55],
+        VoxelKind::Water => [0.16, 0.52, 0.80],
+        VoxelKind::Stone => [0.37, 0.37, 0.39],
+        VoxelKind::Gold => [0.90, 0.73, 0.22],
+        VoxelKind::Iron => [0.68, 0.39, 0.30],
+        VoxelKind::Snow => [0.94, 0.96, 0.99],
     }
+}
+
+/// Same palette in linear space — vertex colors multiply the material in
+/// linear space.
+pub fn base_color_linear(kind: VoxelKind) -> [f32; 3] {
+    let [r, g, b] = base_color_srgb(kind);
+    let lin = Color::srgb(r, g, b).to_linear();
+    [lin.red, lin.green, lin.blue]
 }

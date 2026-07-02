@@ -31,6 +31,16 @@ enum Command {
         seed: u64,
         #[arg(long, default_value = "screenshot.png")]
         out: std::path::PathBuf,
+        #[arg(
+            long,
+            help = "Biome row to focus (0-5); defaults to the most scenic biome"
+        )]
+        row: Option<u8>,
+        #[arg(
+            long,
+            help = "Biome col to focus (0-5); defaults to the most scenic biome"
+        )]
+        col: Option<u8>,
     },
 }
 
@@ -41,7 +51,10 @@ fn main() -> Result<()> {
             anyhow::ensure!(row < 6 && col < 6, "row and col must be in 0..5");
             let map = voxel_mapgen::generate(seed);
             println!("{}", voxel_mapgen::ascii_macro(&map));
-            println!("{}", voxel_mapgen::ascii_dump(&map, BiomeCoord::new(row, col)));
+            println!(
+                "{}",
+                voxel_mapgen::ascii_dump(&map, BiomeCoord::new(row, col))
+            );
         }
         Command::Check { seed } => {
             let a = voxel_mapgen::generate(seed);
@@ -62,15 +75,31 @@ fn main() -> Result<()> {
                 anyhow::bail!("Determinism check failed for seed {seed}");
             }
         }
-        Command::Screenshot { seed, out } => {
-            let status = std::process::Command::new("cargo")
-                .args([
-                    "run", "--quiet", "-p", "native", "--",
-                    "screenshot",
-                    "--seed", &seed.to_string(),
-                    "--out",  out.to_str().context("non-UTF-8 output path")?,
-                ])
-                .status()?;
+        Command::Screenshot {
+            seed,
+            out,
+            row,
+            col,
+        } => {
+            let mut args = vec![
+                "run".to_string(),
+                "--quiet".into(),
+                "-p".into(),
+                "native".into(),
+                "--".into(),
+                "screenshot".into(),
+                "--seed".into(),
+                seed.to_string(),
+                "--out".into(),
+                out.to_str().context("non-UTF-8 output path")?.to_string(),
+            ];
+            if let Some(r) = row {
+                args.extend(["--row".into(), r.to_string()]);
+            }
+            if let Some(c) = col {
+                args.extend(["--col".into(), c.to_string()]);
+            }
+            let status = std::process::Command::new("cargo").args(&args).status()?;
             anyhow::ensure!(status.success(), "screenshot command failed");
             println!("Screenshot written to {}", out.display());
         }

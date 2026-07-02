@@ -3,39 +3,41 @@
 A god-game / early-RTS in the spirit of _Mega-Lo-Mania_ (Sensible Software, 1991), rendered as voxel biomes. Target:
 WebAssembly + wgpu (web). Future: iOS. Development is LLM-assisted (Claude CLI) with the user as architect.
 
+This document describes the **implemented** Phase 1 terrain renderer (see `crates/render`, `crates/mapgen`) plus the
+agreed design direction for later phases. Sections marked _future scope_ are not implemented yet.
+
 ---
 
 ## Reference Art
 
 Three concept images live in `docs/reference/`. `sample1.jpg` and `sample3.jpg` are identical (kept as a duplicate
-reference); `sample2.jpg` is a distinct piece. Together they set the visual target for a focused biome.
+reference); `sample2.jpg` is a distinct piece. Together they set the visual target for a focused biome:
 
-- **`sample1.jpg` / `sample3.jpg`** — smooth, low-poly diorama: three snow-capped peaks with hard-edged faceted shading,
-  rounded cone pine trees, a sunken circular pool with a visible "spring" hole, a single wooden cabin with a curved
-  shingle roof, all sitting on a soil block with a clean vertical dirt underside.
-- **`sample2.jpg`** — full cubic-voxel diorama (Minecraft-style): blocky pine trees and bushes built from visible unit
-  cubes, a sandy clearing with a timber-frame building, a river of flat-shaded blue water, and — notably — an eroded,
-  jagged underside where the dirt layer breaks apart into loose gray stone chunks instead of ending in a flat plane.
+- **`sample1.jpg` / `sample3.jpg`** — smooth, low-poly diorama: snow-capped peaks, pine trees, a sunken pool, a cabin,
+  all sitting on a soil block with a clean dirt underside.
+- **`sample2.jpg`** — full cubic-voxel diorama (Minecraft-style): blocky terrain built from visible unit cubes and —
+  notably — an eroded, jagged underside where the dirt breaks apart into loose gray stone chunks.
 
-**Style decision (resolved):** the two directions are not the same renderer, and this project uses both, split by role.
-**Terrain** (ground, relief, water) stays true cell-voxel geometry — axis-aligned unit cubes per `sample2`'s language,
-matching the project's actual approach (`cell → 4×4×4 voxel` expansion, one mesh per flat color, per the "Rendering:
-Multi-Mesh Approach" section of CLAUDE.md). **Props** — trees, bushes, buildings/castles, and any other organic or
-curved geometry such as curved roofs or rounded tree canopies — are **imported 3D models**, not composed from cell
-voxels; see "Decoration Props" below. Sculpted mountain faces stay part of the voxel terrain (faceted, not curved) — see
-"Relief Shading."
+**Style decision (resolved):** **terrain** (ground, relief, water) is true cell-voxel geometry — axis-aligned unit cubes
+per `sample2`'s language, produced by the `cell → 4×4×4 voxel` expansion. **Props** (trees, bushes, buildings) will be
+imported 3D models placed on top of the terrain — _future scope_, see "Decoration Props" below. The floating island's
+jagged underside comes from procedural voxel erosion, per `sample2`.
 
 ---
 
 ## Terminology
 
-- **Biome** — a 12×12×12 cells, the atomic unit of the world. Biomes are arranged in a 6×6 grid.
+- **Biome** — a 12×12×12 grid of cells, the atomic unit of the world. Biomes are arranged in a 6×6 grid.
 - **World** — the 6×6 grid of biomes. Each match happens in one world.
 - **Era** — a technological age assigned to each biome. Biomes can be in different eras at the same time.
-- **Cell** — the logical unit of gameplay: one type (grass, sand, water, stone, dirt, air), holds at most one resource,
-  mined by one miner, built on by one building. 12³ cells per biome.
+- **Cell** — the logical unit of gameplay: one type (soil, sand, water, stone, gold, iron, air), holds at most one
+  resource, mined by one miner, built on by one building. 12³ cells per biome. Lives in `voxel-core::CellType` /
+  `CellGrid`.
 - **Voxel** or **Terrain voxel** — the visual sub-unit a cell expands into at render time. Purely cosmetic; no gameplay
-  semantics. 4³ voxels per cell.
+  semantics. 4³ voxels per cell. Lives in `voxel-render::VoxelKind` / `VoxelVolume`; `mapgen` and `sim` never see
+  voxels.
+
+A biome is therefore **12³ = 1,728 cells logically** and **48³ = 110,592 voxels visually**.
 
 ## Gameplay Concept
 
@@ -46,200 +48,190 @@ auto-resolves.
 
 ### Design pillars (inherited from MLM)
 
-1. **Allocation over micro.** The decision is _how many people on which task_, not clicking soldiers. No unit
-   babysitting.
-2. **Expansion vs. advancement tension.** More towers build armies faster; one strong tower researches faster. The
-   player constantly trades breadth for depth.
-3. **No fog of micromanagement.** Combat, breeding, and mining run themselves once allocated. The skill is in the
-   numbers, not the APM.
+1. **Allocation over micro.** The decision is _how many people on which task_, not clicking soldiers.
+2. **Expansion vs. advancement tension.** More towers build armies faster; one strong tower researches faster.
+3. **No fog of micromanagement.** Combat, breeding, and mining run themselves once allocated.
 4. **Resource-gated tech.** Designs cost elements; elements come from biomes. Where you settle decides what you can
    build.
 
 ---
 
-## World model
+## World Model
 
-### Terminology (two-tier grid)
+### Cell Types (`voxel-core::CellType`)
 
-A biome is therefore **12³ = 1,728 cells logically** and **48³ = 110,592 voxels visually**. The expansion is a pure
-function `cell_type → 4×4×4 voxel pattern` that lives in `render`. `mapgen` and `sim` never see voxels.
+A cell **is** its resource where one exists — there is no separate element field.
 
-### Grid
+| Cell Type | Band                  | Resource | Notes                                          |
+| --------- | --------------------- | -------- | ---------------------------------------------- |
+| soil      | Any                   | —        | Dirt; grows a grass top voxel layer if exposed |
+| sand      | Surface, relief       | —        | Beach yellow                                   |
+| water     | Surface               | water    | Translucent, sunken surface                    |
+| stone     | Any                   | stone    | Gray rock; snow-capped in the high relief band |
+| gold      | Underground           | gold     | Yellow stone                                   |
+| iron      | Underground           | iron     | Reddish stone                                  |
+| air       | Underground\*, relief | —        | \*Underground air = outside the island funnel  |
 
-- One match = a **6×6 grid of 36 biomes**. Same as in original MLM, not all biomes will be rendered leaving an
-  intentional gap in the world.
-- Each biome is a **12×12×12 cell cube** (logical).
-- Each cell expands at render time into a **4×4×4 voxel block** (visual).
+**Snow is not a cell type.** It is a cosmetic `VoxelKind` applied by the expansion to the top voxel layer of exposed
+stone cells at cell layer ≥ 11 (`voxel-core::SNOW_Z`).
 
-### Cell Types
+### Biome anatomy (Z axis in cells, layer 1 = bottom, `z` = layer − 1)
 
-| Cell Type | Band                                 | Rendering Notes                                                                                             | Resource Name |
-| --------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------- | ------------- |
-| soil      | Any                                  | Grass on top, dirt below.                                                                                   | None          |
-| sand      | Surface                              | All "beach yellow" sand.                                                                                    | None          |
-| water     | Surface, Underground                 | Blue, transparent 50%.                                                                                      | water         |
-| stone     | Any                                  | Gray stone.                                                                                                 | stone         |
-| gold      | Underground                          | Yellow stone.                                                                                               | gold          |
-| iron      | Underground                          | Reddish stone.                                                                                              | iron          |
-| air       | Above-ground                         | Empty space.                                                                                                | None          |
-| snow      | Relief (cell layer ≥ 11), stone only | White cap on tall stone peaks; cosmetic top-voxel layer, not a full-depth cell type — see § Relief Shading. | None          |
-
-### Material Palette (from reference art)
-
-Colors observed in `docs/reference/`, for tuning `StandardMaterial::base_color` per cell type:
-
-| Cell Type    | Reference color                                                                                               | Notes                                                                                                          |
-| ------------ | ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| soil (grass) | Saturated mid-green top, burnt-orange/brown dirt below                                                        | Grass reads more saturated than a pastel green                                                                 |
-| soil (dirt)  | Warm brown, slightly redder than neutral gray                                                                 | Same hue reused for the underside skirt (see "Focused Biome Presentation")                                     |
-| sand         | Warm tan/khaki, close to the path/beach color in both refs                                                    |                                                                                                                |
-| water        | Two variants seen: deep teal-blue (still pool) and lighter cyan (flowing stream) with visible surface texture | Flat 50% transparency alone reads flatter than the reference; a lighter rim/foam tone at edges would help      |
-| stone        | Neutral mid-gray, faceted rather than smooth                                                                  | Mountains and underside rubble share this gray                                                                 |
-| gold         | Not depicted in reference art                                                                                 | Keep yellow-stone per current spec; no visual reference yet                                                    |
-| iron         | Not depicted in reference art                                                                                 | Keep reddish-stone per current spec; no visual reference yet                                                   |
-| snow         | Off-white/pale blue-gray                                                                                      | Cosmetic top-voxel material for high-elevation relief only, not a new gameplay cell type; see "Relief Shading" |
-
-### Cell's Voxels Rendering
-
-**Top Z** - top surface
-
-| Cell Type | Rule                                    | Voxel Layers (Z) | Rendering Notes |
-| --------- | --------------------------------------- | ---------------- | --------------- |
-| soil      | Top Z == air                            | 4                | 1 grass, 3 dirt |
-| soil      | Top Z != air                            | 4                | 4 dirt          |
-| sand      | Top Z == air                            | 3                | 1 air, 3 sand   |
-| sand      | Top Z != air                            | 4                | 4 sand          |
-| water     | Top Z == air                            | 2                | 2 air, 2 water  |
-| water     | Top Z != air                            | 4                | 4 water         |
-| stone     | Relief (cell layer ≥ 11) & Top Z == air | 4                | 1 snow, 3 stone |
-| stone     | Otherwise                               | 4                | 4 stone         |
-| gold      |                                         | 4                | 4 gold          |
-| iron      |                                         | 4                | 4 iron          |
-| air       |                                         | 4                | 4 air           |
-
-### Biome anatomy (Z axis in cells, 1 = bottom)
-
-| Layers | Band        | Contents                                                                                                     |
-| ------ | ----------- | ------------------------------------------------------------------------------------------------------------ |
-| 1–5    | Underground | Resource deposits.                                                                                           |
-| 6      | Surface     | Connection layer. Towers and buildings sit here. Water surfaces sit here. Edge strips are flat and typed.    |
-| 7–12   | Above       | Relief: hills, mountains, otherwise air. Cosmetic + line-of-sight flavor. No gameplay collision in the demo. |
-
-All layer indices in this spec refer to **cell layers** unless stated otherwise. A cell layer corresponds to 4 voxel
-layers along Z.
+| Layers | Band        | Contents                                                                                                   |
+| ------ | ----------- | ---------------------------------------------------------------------------------------------------------- |
+| 1–5    | Underground | Floating-island funnel of soil salted with resource deposits. Tapers toward the bottom tip.                |
+| 6      | Surface     | Always solid, typed by the biome. Interior ponds in grass/sand biomes. Edge strips are flat and typed.     |
+| 7–12   | Above       | Relief: rolling hills + sparse mountain peaks, otherwise air. Cosmetic + line-of-sight flavor; no gameplay |
+|        |             | collision in the demo.                                                                                     |
 
 ### Connections
 
 - Adjacent biomes connect **only at cell layer 6**, by **surface-type match** (water↔water, sand↔sand, grass↔grass,
   stone↔stone). Incompatible neighbors have **no connection**.
-- The connecting edge strip is **flat** (no relief) so movement across it is clean.
-- **Gameplay role of connection type (proposed, tunable):** edge type gates which armies may cross. Land types are
-  crossable by land armies; **water connections require naval- or air-capable units** (a later tech tier).
-
-### Relief Shading (Mountains)
-
-Both reference pieces cap tall relief with **snow**, distinct from the stone below it — not a uniform gray peak. Snow is
-a **cosmetic top-voxel material, not a new gameplay cell type** — the six cell types in Terminology are unchanged. Per §
-Cell's Voxels Rendering: any `stone` cell in the relief band (layers 7–12) whose top voxel is exposed to air **and**
-sits at cell layer ≥ 11 (the top two layers of the relief band) renders its top voxel layer as snow instead of stone —
-the same top-layer-override pattern already used for grass-on-soil.
-
-- Snow only applies to relief columns tall enough to reach layer 11+; low hills and flat biomes show no snow, matching
-  the reference (only the tallest peaks are capped).
-- Mountain faces in the reference are faceted (hard-edged low-poly), not smoothed — this favors flat-shaded
-  per-voxel-face normals over vertex smoothing, which the voxel mesh approach already implies.
-- Rock faces show scattered dark "pockmark" detail (small cavities/boulders) — treat as a stretch-goal texture/normal
-  variation, not required for the initial terrain renderer.
+- The one-cell edge ring of every biome is always the biome's own surface type and carries **no relief and no ponds**,
+  so compatible borders match cell-for-cell and movement across them is clean. This is enforced by the invariant tests.
+- **Gameplay role (proposed, tunable):** edge type gates which armies may cross; water connections require naval- or
+  air-capable units (a later tech tier).
 
 ---
 
-## Procedural generation (`mapgen` crate)
+## Procedural Generation (`mapgen` crate)
 
-`mapgen` operates exclusively on cells. Voxel expansion is `render`'s concern.
+`mapgen` operates exclusively on cells and is engine-free (compiles to wasm, runs headless in CI).
 
-### Building Phases
+`generate(seed) -> WorldMap` runs two passes:
 
->
+1. **Macro pass** (`macro_pass.rs`) — weighted-random `BiomeType` per biome (grass 40 / sand 25 / water 20 / rock 15)
+   using `ChaCha8Rng::seed_from_u64(seed)`, then a `Connection` for every internal border (compatible = same type on
+   both sides). Connections live in a `BTreeMap` — **never `HashMap` on deterministic paths** (iteration order).
 
-**Phase I World Build:**
-
-1. Generate the 6×6 grid of biomes, each with a 12³ cell grid, and render one biome for inspection.
-2. For each of the 60 internal borders, assign a connection type using a **compatibility rule-table** keyed on the two
-   biome types.
-
-**Phase II Biome Build:** (for each biome)
-
-1. Update 12³ cell grid honoring: its 4 prescribed edge connection types (flat typed strip at cell layer 6),
-   world-space-noise relief in layers 7–12, and element distribution in layers 1–5.
-2. Shape 1–5 (Underground) layers to the funnel to mimic floating island topography.
-
-**Phase III Cell Shaping:** (for each cell)
-
-1. Shape cell based on `Cell's Voxels Rendering` rules above
-2. For each water to cell transition shape the slope:
-   - If the cell is water and the neighbor on x or y is not water, then the water cell will have bottom layer of vortex
-     of the inherited type of the neighbor cell
+2. **Interior pass** (`interior.rs`) — fills each biome's 12³ `CellGrid`:
+   - **Underground (z 0–4):** the island funnel. Walked top-down per column: the layer under the surface is always full
+     (the surface always has support), deeper layers keep a shrinking, noise-perturbed footprint, and the first cut
+     truncates everything below it — so underground mass always hangs from the layer above. Cells inside the funnel are
+     soil salted with deposits: **stone ≥ 30%** (denser toward the bottom, so the underside reads as rubble), **iron
+     ~10%** (z ≤ 3), **gold ~5%** (z ≤ 2). Rarities are enforced by a loose-bounds invariant test and measurable via
+     `cargo run -p voxel-mapgen --example stats`.
+   - **Surface (z 5):** the biome's surface cell everywhere; grass/sand biomes get interior **ponds** carved where a
+     pond noise field exceeds a threshold (never on the edge ring).
+   - **Relief (z 6–11):** column heights = rolling-hills field **plus** a sparse mountain-peak field (higher frequency
+     than the hills — with only 6 relief layers, peaks must stay a few cells wide or they clip into flat-topped mesas).
+     Heights fade to zero over the three cells nearest a biome edge. Water biomes and pond cells stay flat. Tall columns
+     (≥ 4) are bare stone (mountains); low relief keeps the biome's surface material; rock biomes are stone throughout.
+     No floating cells by construction.
 
 ### Determinism contract
 
-- `generate(world_seed, biome_coord) -> Biome` is **pure and deterministic** and returns a cell grid.
-- Noise is sampled in **world cell coordinates** (`biome_coord * 12 + local_cell`) so adjacent biomes share a continuous
-  field.
-- **Test:** for any two adjacent biomes, the shared cell-layer-6 edge strip matches type cell-for-cell and is flat. Runs
-  headless in CI; no GPU.
+- All interior noise is Perlin, seeded from the world seed via `derive_u32(seed, offset)` and sampled in **world cell
+  coordinates** (`biome_col * 12 + local_x`), so fields are continuous across borders and biome generation order can
+  never affect results. The ChaCha RNG feeds the macro pass only.
+- **Tests** (`crates/mapgen/tests/invariants.rs`, headless): same-seed byte-equality, per-band cell-type constraints,
+  underground hangs-from-above, edge-ring purity, compatible-border strip equality, resource rarity bounds, proptest
+  over random seeds, and insta ASCII snapshots. Regenerate snapshots after intentional changes with
+  `INSTA_UPDATE=always`.
 
-### Elements / resources
+---
 
-| Element | Cell Layer | Rarity (tunable) | Hard Rule |
-| ------- | ---------- | ---------------- | --------- |
-| stone   | any        | at least 30%     |           |
-| iron    | 1–5        | 10%              |           |
-| gold    | 1–5        | 5%               |           |
+## Cell → Voxel Expansion (`render/src/expansion.rs`)
+
+The expansion is a pure function of the cell grid, the inspector's layer cutoff, and the biome's world position + seed.
+`cell_column(cell, top_air, cz)` gives each cell's 4 voxel sub-layers (also rendered as swatches in the inspector's
+"Cell → voxel patterns" panel):
+
+**Top Z == air** means the cell above is air (or peeled away by the layer cutoff — peeled soil regrows a grass top,
+exactly like natural terrain).
+
+| Cell Type | Rule                     | Voxel column (bottom → top)           |
+| --------- | ------------------------ | ------------------------------------- |
+| soil      | Top Z == air             | dirt, dirt, dirt, **grass**           |
+| soil      | Top Z != air             | dirt ×4                               |
+| sand      | Top Z == air             | sand ×3, **air** (sunken)             |
+| sand      | Top Z != air             | sand ×4                               |
+| water     | Top Z == air             | water ×2, **air ×2** (sunken surface) |
+| water     | Top Z != air             | water ×4                              |
+| stone     | Top Z == air and cz ≥ 10 | stone ×3, **snow**                    |
+| stone     | otherwise                | stone ×4                              |
+| gold      |                          | gold ×4                               |
+| iron      |                          | iron ×4                               |
+| air       |                          | (no voxels)                           |
+
+### Underside erosion (the "floating island" break)
+
+After expansion, two erosion passes nibble voxels off the exposed underground boundary (side/bottom exposure only —
+peeled top layers stay crisp), with probability rising toward the island's bottom tip. Combined with the cell-tier
+funnel this turns clean cell-sized steps into the ragged rubble underside of `sample2`. Deterministic per world voxel
+coordinate + seed (`voxel_hash01`), so screenshots are stable. This is render-side cosmetics: it never touches `mapgen`
+data or its invariant tests.
+
+---
+
+## Meshing (`render/src/mesh.rs`)
+
+- **One opaque mesh + one translucent water mesh per biome** — not one mesh per color. Bevy 0.19's `StandardMaterial`
+  consumes `Mesh::ATTRIBUTE_COLOR` (vertex colors, linear space) automatically, so per-voxel color lives in the mesh and
+  both materials are shared white handles (`terrain_material()`, `water_material()`).
+- Naive face culling against opaque neighbors; water faces render only against air. Faces are wound CCW for default
+  backface culling (the voxel→world axis swap flips handedness — the face table accounts for it).
+- **Baked ambient occlusion:** classic 3-neighbour corner AO per vertex, four levels (1.0 / 0.82 / 0.66 / 0.5),
+  multiplied into vertex color; quad diagonals flip to interpolate AO smoothly. Water skips AO.
+- **Per-voxel jitter:** deterministic hash of world voxel coords scales value per material (grass patchiest, snow most
+  uniform) — this is what makes flat color fields read as living voxel art.
+- Coordinates: cell = 1.0 world unit, voxel = 0.25. Voxel `(x, y, z)` → Bevy world `(x, z, y)` — voxel-Z is world-up.
+
+### Material palette (sRGB, authored against the reference art)
+
+| VoxelKind | sRGB               | Jitter |
+| --------- | ------------------ | ------ |
+| grass     | (0.36, 0.70, 0.22) | 0.13   |
+| dirt      | (0.56, 0.36, 0.22) | 0.10   |
+| sand      | (0.89, 0.80, 0.55) | 0.06   |
+| water     | (0.16, 0.52, 0.80) | 0.04   |
+| stone     | (0.37, 0.37, 0.39) | 0.14   |
+| gold      | (0.90, 0.73, 0.22) | 0.18   |
+| iron      | (0.68, 0.39, 0.30) | 0.14   |
+| snow      | (0.94, 0.96, 0.99) | 0.03   |
+
+Water material: white base at alpha 0.72, `AlphaMode::Blend`, low roughness for a specular sheen.
+
+---
+
+## Lighting & Atmosphere (`render/src/lib.rs`)
+
+- **Key sun** — warm directional light, low-ish and lateral so relief casts readable shadows across the surface,
+  `shadow_maps_enabled: true` with a single tight shadow cascade (crisp on the focused biome; the island's shadow never
+  lands on far proxy tiles).
+- **Cool fill** — a second, shadowless directional from the default camera side lifts the south/west faces the viewer
+  actually sees, keeping baked AO readable instead of crushing to black.
+- **Ambient** — sky-tinted `AmbientLight` (a component in Bevy 0.19, not a resource).
+- **Fog** — `DistanceFog` on the camera, linear falloff starting just past the focused biome's depth range, fading the
+  proxy ring into the sky color. `ClearColor` and fog share `SKY_COLOR`.
 
 ## Focused Biome Presentation
 
-Both reference pieces render a biome as a **free-floating chunk**, not a flat-bottomed box: the underground material
-tapers from a clean vertical dirt wall into an irregular, jagged mass of loose stone at the bottom, then stops. This is
-purely cosmetic — there is no cell data below cell layer 1 — and should be treated as a decorative "skirt" mesh appended
-below the logical 12³ grid only for the **focused** biome (the other 35 biomes already render as dimmed silhouette
-proxies per § Lighting & atmosphere below, so they don't need a skirt).
+- The focused biome renders in full voxel detail at the world origin.
+- The other 35 biomes render as **dimmed, lit proxy slabs** floating at the focused biome's surface altitude (spacing 15
+  world units), so the world reads as an archipelago of floating islands receding into fog.
+- The inspector boots focused on the seed's **most scenic biome** (deterministic score: relief drama + pond bonus —
+  `voxel-app::scenic_biome`), so `cargo run -p native -- inspect --seed N` always opens on a good composition.
+  `cargo xtask screenshot` accepts `--row/--col` to frame any specific biome instead.
 
-- The skirt should be procedurally irregular (e.g. a noise-cut silhouette per outer face) rather than a mirrored flat
-  underside, so it reads as "broken off the world" rather than "boxed."
-- Skirt coloring reuses the underground materials already present in the biome's layers 1–5 (mostly dirt/stone) — no new
-  resource-bearing geometry.
-- Scope: this is additional geometry generated in `render`, not `mapgen`; it must not affect the cell-tier invariant
-  tests in the Invariant Tests section. It should still be seeded/deterministic for a stable screenshot in
-  `cargo xtask screenshot`, but does not need `mapgen`'s determinism-test guarantees.
+## Inspector (`app` crate)
 
-## Decoration Props (imported 3D assets, future scope)
+- **Travel:** orbit / pan / zoom orthographic camera; click the 6×6 grid, or Tab / arrow keys.
+- **Inspect:** hover resolves to a **cell** (not a voxel) via an Amanatides–Woo DDA through the 12³ grid; the panel
+  shows local/world coords, cell layer, band, type, and resource.
+- **Layer peel:** slider hides cell layers z ≥ cutoff; peeled soil grows grass tops so cross-sections stay readable.
+- **Expansion preview:** the "Cell → voxel patterns" panel draws every cell type's exposed/covered voxel columns from
+  the same `cell_column` function the mesher uses.
+- **Exports:** ASCII dump (macro map + surface + relief heights + all underground layers) and PNG screenshot.
 
-Both reference images dress the terrain with decoration that is **not** cell/voxel geometry:
+## Decoration Props (imported 3D assets, _future scope_)
 
-- **Trees** — rounded pine canopies.
-- **Bushes/shrubs** — small ground-cover clusters, occasionally flowering.
-- **Buildings** — a wooden cabin/hut in the references, but the era-driven building set will include grander structures
-  (e.g. castles) as tech advances. Curved roofs and non-axis-aligned silhouettes rule out voxel composition for any of
-  these.
-- **Path/plaza** — a cleared strip under the building; this stays voxel terrain (sand/dirt), it's not a prop.
+Trees, bushes, and era-driven buildings are **imported 3D models (glTF/GLB), not composed from cell voxels** — curved
+roofs and rounded canopies rule out voxel composition. They will be placed on top of the voxel terrain by `render`/`app`
+via Bevy's `AssetServer`, separate from the procedural mesher. Whether placement is seeded by biome coordinate or purely
+cosmetic is an open question. None of this is required for Phase 1 terrain rendering; documented so the prop pipeline
+has a landing spot.
 
-**Props are imported 3D models (e.g. glTF/GLB), not composed from cell voxels.** They're placed on top of the voxel
-terrain by `render`/`app`, which needs an asset-loading pipeline (Bevy `AssetServer` + `Gltf` handles) separate from the
-procedural voxel mesher in `mesh.rs`. Whether placement (which prop, where, how many) is deterministic per `mapgen`
-output (e.g. seeded by biome coordinate) or purely cosmetic per `render` is an open question for later.
-
-None of this is required to hit "ability to render biomes" — that's terrain only: cell → voxel → mesh. Documented here
-so the prop pipeline has a landing spot when it's tackled.
-
-## Lighting & atmosphere
-
-- **Soft shadows.** The scene's single `DirectionalLight` casts soft-edged shadows (Bevy's soft/PCF shadow maps,
-  `shadow_maps_enabled = true`), not hard-edged ones, so the focused biome reads as a physical diorama rather than a
-  flat cutout. Shadow resolution only needs to cover the single in-view biome (48³ voxels + decoration meshes), not the
-  full 6×6 grid.
-- **Very light fog.** A subtle distance fog (Bevy's `DistanceFog` component, low density) is applied outward from the
-  camera. The fixed-angle orthographic camera has no natural perspective depth cue, so this faint fog is the primary way
-  distance reads visually — it should fade the dimmed silhouette proxies of the other 35 biomes slightly more than the
-  focused biome, while staying light enough that nothing becomes illegible.
-- Both are **purely cosmetic**: they affect `render`/`app` only and have no bearing on `mapgen`/`sim` determinism or the
-  cell-tier invariant tests in §17.6.
+Stretch goals from the reference art, also future scope: pockmark detail on rock faces, lighter rim/foam tone at water
+edges, and the water-edge "vortex" slope transition from the original spec's Phase III.

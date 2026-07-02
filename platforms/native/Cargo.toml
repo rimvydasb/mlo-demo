@@ -8,5 +8,6 @@ name = "native"
 path = "src/main.rs"
 
 [dependencies]
-voxel-app = { workspace = true }
-clap      = { workspace = true }
+voxel-app  = { workspace = true }
+voxel-core = { workspace = true }
+clap       = { workspace = true }

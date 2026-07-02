@@ -12,11 +12,12 @@ with `RUSTC=...`; the config handles it. If you add a new developer machine, upd
 ## Common Commands
 
 ```bash
-# Run the interactive inspector
+# Run the interactive inspector (boots on the seed's most scenic biome)
 cargo run -p native -- inspect --seed 42
 
 # Headless PNG screenshot (opens window briefly, then exits)
 cargo xtask screenshot --seed 42 --out shot.png
+cargo xtask screenshot --seed 42 --row 3 --col 5 --out shot.png   # specific biome
 
 # ASCII top-down map dump (stdout, no window)
 cargo xtask dump --seed 42
@@ -25,9 +26,12 @@ cargo xtask dump --seed 42 --row 2 --col 3   # specific biome
 # Determinism check
 cargo xtask check --seed 42
 
+# Cell-type distribution stats (for tuning deposit rarities)
+cargo run -p voxel-mapgen --example stats
+
 # Tests
-cargo test -p voxel-core -p voxel-mapgen     # all pure-crate tests (fast)
-cargo test -p voxel-mapgen --test invariants  # integration + proptest suite only
+cargo test -p voxel-core -p voxel-mapgen -p voxel-render   # all pure-crate tests (fast)
+cargo test -p voxel-mapgen --test invariants               # integration + proptest suite only
 
 # Update insta snapshots after intentional mapgen changes
 INSTA_UPDATE=always cargo test -p voxel-mapgen --test invariants
@@ -35,7 +39,7 @@ INSTA_UPDATE=always cargo test -p voxel-mapgen --test invariants
 # WASM compile check
 cargo check -p web --target wasm32-unknown-unknown
 
-# Format Markdown files (Prettier is configured for Markdown only; .rs files use rustfmt)
+# Format Markdown files (Prettier is configured for Markdown only; .rs files use rustfmt / cargo fmt)
 npx prettier --write "**/*.md"
 npx prettier --check "**/*.md"
 ```
@@ -45,11 +49,11 @@ npx prettier --check "**/*.md"
 The workspace has a strict dependency layering:
 
 ```
-voxel-core   (types only, no engine, no std-heavy deps)
-    └── voxel-mapgen   (pure mapgen, no Bevy)
+voxel-core   (cell-tier types only, no engine, no std-heavy deps)
+    └── voxel-mapgen   (pure mapgen on cells, no Bevy)
             └── xtask  (host-only automation, no Bevy)
-    └── voxel-render   (Bevy mesh/camera plugin)
-            └── voxel-app  (Bevy app + egui inspector)
+    └── voxel-render   (Bevy: cell→voxel expansion, meshing, camera, lighting)
+            └── voxel-app  (Bevy app + egui inspector, picking, scene rebuild)
                     ├── platforms/native  (clap CLI entry)
                     └── platforms/web     (wasm-bindgen entry)
 ```
@@ -57,45 +61,69 @@ voxel-core   (types only, no engine, no std-heavy deps)
 `core` and `mapgen` must stay engine-free — they compile to wasm and are used headlessly in xtask. Any Bevy import
 belongs in `render` or `app`.
 
+## Two-Tier Grid: Cells vs Voxels
+
+This is the load-bearing separation of the whole codebase (see `docs/rendering.md`):
+
+- **Cell** (`voxel-core::CellType`, `CellGrid`): the logical/gameplay unit. 12³ per biome. Types: Air, Soil, Sand,
+  Water, Stone, Gold, Iron. A cell _is_ its resource (`CellType::resource()`) — there is no separate element field.
+  `mapgen` and future `sim` code operate on cells only.
+- **Voxel** (`voxel-render::VoxelKind`, `VoxelVolume`): the cosmetic visual sub-unit. Each cell expands to 4×4×4 voxels
+  at render time (48³ per biome) via `expansion.rs::cell_column` — grass tops on exposed soil, sunken water surfaces,
+  snow caps on tall stone (`SNOW_Z`), plus deterministic underside erosion for the floating-island look. Voxels never
+  leak out of `render`.
+
+Snow is a `VoxelKind` only, **not** a `CellType`.
+
 ## Coordinate Systems
 
-There are two coordinate spaces that must not be confused:
-
-- **Voxel space**: `(vx, vy, vz)` where Z is the vertical axis (z=0 is underground layer 1, z=5 is surface, z=6–11 is
-  relief/above-ground)
-- **World/Bevy space**: voxel `(vx, vy, vz)` maps to Bevy `(vx, vz, vy)` — voxel-Z becomes Bevy-Y (up). This mapping is
-  applied in `mesh.rs` when building vertex positions.
-
-Biome coordinates: `BiomeCoord { row, col }` where row=0 is north, col=0 is west, in a 6×6 grid.
+- **Cell space**: `(x, y, z)` with Z up; z=0 is the deepest underground layer (cell layer 1), z=5 (`SURFACE_Z`) is the
+  surface, z=6–11 is relief. Cell layers in docs/UI are 1-based (layer = z + 1).
+- **World/Bevy space**: 1 cell = 1.0 world unit, 1 voxel = 0.25. Cell/voxel `(x, y, z)` maps to Bevy `(x, z, y)` —
+  grid-Z becomes Bevy-Y (up). Applied in `mesh.rs` (vertex emit) and inverted in `app/src/picking.rs` (cursor ray → cell
+  DDA). The axis swap flips winding handedness — the face table in `mesh.rs` is ordered so emitted world-space triangles
+  are CCW; keep backface culling in mind if you touch it.
+- **Biome coordinates**: `BiomeCoord { row, col }`, row 0 = north, col 0 = west, 6×6 grid.
 
 ## Mapgen: Two-Pass Generation
 
 `mapgen::generate(seed)` runs two sequential passes:
 
-1. **Macro pass** (`macro_pass.rs`): assigns `BiomeType` to each of the 36 biomes via weighted random, then computes
-   `Connection` compatibility for all shared edges (compatible = same biome type on both sides).
+1. **Macro pass** (`macro_pass.rs`): weighted-random `BiomeType` per biome, then `Connection` compatibility for all
+   shared edges (compatible = same biome type on both sides).
 
-2. **Interior pass** (`interior.rs`): fills each biome's `VoxelGrid` (12×12×12). Uses world-space coordinates
-   (`world_x = col*12 + local_x`) for all noise sampling so biomes tile seamlessly. Layers:
-   - z=0–4: `Material::Underground` + element placement via Perlin noise thresholds (elements get rarer toward surface)
-   - z=5: `Material::Ground(biome_type)`, always solid, no element (surface layer)
-   - z=6–11: `Material::Ground` or `Air` based on height noise; Water biomes and edge voxels stay flat
+2. **Interior pass** (`interior.rs`): fills each biome's 12³ `CellGrid` using world-space noise coordinates
+   (`world_x = col*12 + x`) so fields tile seamlessly:
+   - z=0–4: floating-island **funnel** (walked top-down so mass always hangs from the layer above; the layer under the
+     surface is always full) with deposits — stone ≥30%, iron ~10%, gold ~5% of solid underground cells.
+   - z=5: surface, always solid, typed by biome; interior ponds in grass/sand biomes; the one-cell edge ring is always
+     the pure biome type (edge continuity depends on this).
+   - z=6–11: relief = rolling hills + sparse high-frequency mountain peaks; fades flat within 3 cells of a border; water
+     biomes and pond columns stay flat; columns ≥4 high become stone.
 
-RNG is `ChaCha8Rng::seed_from_u64(seed)` (macro pass only). Interior uses deterministic Perlin noise seeded from the
-world seed via `derive_u32(seed, offset)`, so order of biome generation does not affect results.
+RNG is `ChaCha8Rng::seed_from_u64(seed)` (macro pass only). Interior uses Perlin noise seeded via
+`derive_u32(seed, offset)`, so biome generation order can never affect results.
 
 **Never use `HashMap` for deterministic paths** — iteration order is non-deterministic. Use `BTreeMap` (already used for
 `WorldMap::connections`).
 
-## Rendering: Multi-Mesh Approach
+## Rendering: Vertex-Colored Meshes
 
-`StandardMaterial::vertex_colors` was removed in Bevy 0.19. Instead, `render/src/mesh.rs::build_voxel_meshes()` returns
-`Vec<(Mesh, [f32; 3])>` — one mesh per unique voxel color. Each is spawned as a separate entity with its own
-`StandardMaterial { base_color: Color::srgb(r, g, b), .. }`. This means rebuilding the scene despawns and respawns
-O(N_colors) entities, tracked in `SceneEntities.biome_meshes: Vec<Entity>`.
+**Mesh vertex colors work in Bevy 0.19**: insert `Mesh::ATTRIBUTE_COLOR` (Float32x4, **linear** color space) and
+`StandardMaterial` picks it up automatically (shader def `VERTEX_COLORS`). Do not build one mesh per color.
 
-`rebuild_scene` in `app/src/lib.rs` only runs when `WorldMapResource`, `FocusedBiome`, or `LayerCutoff` are changed
-(Bevy change detection).
+`render/src/mesh.rs::build_biome_meshes()` returns one **opaque mesh** (all solid voxels, shared white
+`terrain_material()`) and one **translucent water mesh** (`water_material()`, alpha blend). Baked into vertex colors:
+per-voxel value jitter (deterministic `voxel_hash01` of world voxel coords) and classic 3-neighbour ambient occlusion
+(with AO-driven quad diagonal flips). Scene = 2 mesh entities per focused biome + 35 proxy slabs, tracked in
+`SceneEntities` and rebuilt by `rebuild_scene` in `app/src/lib.rs` only when `WorldMapResource`, `FocusedBiome`, or
+`LayerCutoff` change (Bevy change detection). Material handles are cached in `TerrainMaterials` — meshes change on
+rebuild, materials never do.
+
+Lighting lives in `render/src/lib.rs::spawn_lights`: warm key sun (shadow maps on, single tight cascade) + cool
+shadowless fill from the camera side + ambient; `DistanceFog` on the camera fades proxies into `SKY_COLOR`. If you
+retune the palette (`base_color_srgb`), remember the tone mapper compresses grays — verify with a screenshot, not by
+eyeballing sRGB values.
 
 ## Bevy 0.19 Critical API Differences
 
@@ -105,11 +133,13 @@ These differ from most online examples (which target Bevy 0.14–0.15):
 - `AmbientLight` is a **Component** (not a Resource): `commands.spawn(AmbientLight { .. })`
 - `ScalingMode` is at `bevy::camera::ScalingMode` (not `bevy::render::camera::ScalingMode`)
 - `RenderAssetUsages` is at `bevy::asset::RenderAssetUsages`
+- `CascadeShadowConfigBuilder` is at `bevy::light::CascadeShadowConfigBuilder`; spawn `.build()` next to the light
 - `OrthographicProjection`: use `Projection::from(OrthographicProjection { .. })`, not `Projection::Orthographic(..)`
 - `Query::get_single()` → `query.single()` (returns `Result`); `get_single_mut()` → `single_mut()` or
   `iter_mut().next()`
 - `WindowResolution::new(u32, u32)` — `From<(f32,f32)>` is gone
 - `DirectionalLight.shadows_enabled` → `shadow_maps_enabled`
+- Vertex colors: no `StandardMaterial` toggle — presence of `Mesh::ATTRIBUTE_COLOR` enables them
 - Screenshots: `commands.spawn(Screenshot::primary_window()).observe(save_to_disk(path))`
 
 ## bevy_egui 0.40 Critical API Differences
@@ -130,12 +160,16 @@ The `web` crate needs `getrandom = { version = "0.2", features = ["js"] }` as an
 
 ## Invariant Tests
 
-The mapgen invariant suite in `crates/mapgen/tests/invariants.rs` enforces:
+The mapgen invariant suite in `crates/mapgen/tests/invariants.rs` enforces (all on the **cell tier**):
 
-- Underground (z=0–4): `Material::Underground`, elements allowed
-- Surface (z=5): `Material::Ground(*)`, no element
-- Relief (z=6–11): `Material::Air` or `Material::Ground(*)`, no elements, no floating voxels
-- Edge continuity: compatible biome borders have matching surface material at the shared edge strip (z=5)
-- Determinism: same seed → byte-identical grids
+- Underground (z=0–4): only Air/Soil/Stone/Gold/Iron; every solid cell has a solid cell directly above (funnel hangs
+  from the surface)
+- Surface (z=5): never Air; edge ring is exactly the biome's surface type; interior is surface type or (grass/sand only)
+  pond water
+- Relief (z=6–11): only Air/Soil/Sand/Stone; no resources; no floating cells; flat on the edge ring and above water
+- Edge continuity: compatible borders match cell-for-cell along the shared layer-6 strip
+- Resource rarity: stone ≥30%, iron/gold within loose bounds around 10%/5%
+- Determinism: same seed → byte-identical grids (plus proptest over random seeds)
 
-Snapshots live in `crates/mapgen/tests/snapshots/`. Regenerate with `INSTA_UPDATE=always`.
+Snapshots live in `crates/mapgen/tests/snapshots/`. Regenerate with `INSTA_UPDATE=always`. The render crate has its own
+unit tests for the expansion rules (grass tops, sunken water, snow caps, erosion determinism).

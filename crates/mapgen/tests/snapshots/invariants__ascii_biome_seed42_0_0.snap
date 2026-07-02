@@ -3,32 +3,99 @@ source: crates/mapgen/tests/invariants.rs
 expression: "voxel_mapgen::ascii_dump(&map, BiomeCoord::new(0, 0))"
 ---
 Biome (0,0) — Grass
-legend: . grass  s sand  ~ water  # rock
-layer 6 (surface):
+legend: (space) air  . soil  s sand  ~ water  # stone  G gold  I iron
+
+surface (cell layer 6):
+............
+..~~~~......
+..~~~.......
 ............
 ............
-............
-............
-............
-............
-............
-............
-............
-............
-............
+.........~~.
+.........~~.
+........~~~.
+.......~~~~.
+.~~~~~~~~~..
+.~~~~~~~....
 ............
 
-underground element map (layer 5, z=4):
-legend: . none  o stone  S sand  I iron  C crystal  X obsidian
-oooooooo....
-oooooooooooo
-oooooooooooo
-oooooooooooo
-oooooooooooo
-oooooooooooo
-ooIIIIoooooo
-oIIIIIIooooo
-oIIIIIIooooo
-oIIIIIIooooo
-..IIIIoooooo
-S..IIIooSSSS
+relief height (cells above surface, 0-6):
+000000000000
+000000211110
+000004433210
+001135565310
+001123455320
+000111345000
+000111123000
+000111110000
+000111100000
+000000000010
+000000001110
+000000000000
+
+underground (cell layer 5):
+.###........
+.###....##..
+........####
+..........##
+..........##
+..........##
+##........##
+###.......##
+##........##
+............
+....##......
+....###.....
+
+underground (cell layer 4):
+    ...###I 
+ .II...#### 
+ III...#### 
+ II....I####
+......II####
+###......###
+###.....I###
+###....III##
+##..I..II.##
+..........##
+ I........# 
+   ###.I    
+
+underground (cell layer 3):
+            
+  ..# ###   
+  ########  
+  ######III 
+ I#G###.II# 
+ II#.GII..# 
+ GI..GII..G 
+  G..GGI... 
+  G.I.GGII# 
+  ###.G..#  
+    ##..    
+            
+
+underground (cell layer 2):
+            
+            
+    #####   
+   III#G#G  
+  II##G##   
+  ####..II  
+  I#G....#  
+  II######  
+  ###IG###  
+  #  G###   
+            
+            
+
+underground (cell layer 1):
+            
+            
+            
+    ##G     
+   G#####   
+   GG##..   
+   ######   
+   #####I   
+   ####GG

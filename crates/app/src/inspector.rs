@@ -1,34 +1,27 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
-use voxel_core::{BiomeCoord, BiomeType, Material};
-use voxel_render::{EguiWantsPointer, FocusedBiome, LayerCutoff};
+use voxel_core::{BiomeCoord, BiomeType, CellType, CELLS, SNOW_Z, SURFACE_Z, WORLD_BIOMES};
+use voxel_render::{
+    base_color_srgb, cell_column, EguiWantsPointer, FocusedBiome, LayerCutoff, VoxelKind, SUB,
+};
 
 use crate::state::{InspectorState, WorldMapResource};
 
 fn biome_char(bt: BiomeType) -> char {
     match bt {
         BiomeType::Grass => '.',
-        BiomeType::Sand  => 's',
+        BiomeType::Sand => 's',
         BiomeType::Water => '~',
-        BiomeType::Rock  => '#',
-    }
-}
-
-fn biome_label(bt: BiomeType) -> &'static str {
-    match bt {
-        BiomeType::Grass => "Grass",
-        BiomeType::Sand  => "Sand",
-        BiomeType::Water => "Water",
-        BiomeType::Rock  => "Rock",
+        BiomeType::Rock => '#',
     }
 }
 
 pub fn egui_inspector(
-    mut contexts:   EguiContexts,
-    mut state:      ResMut<InspectorState>,
-    mut world_map:  ResMut<WorldMapResource>,
-    mut focused:    ResMut<FocusedBiome>,
-    mut cutoff:     ResMut<LayerCutoff>,
+    mut contexts: EguiContexts,
+    mut state: ResMut<InspectorState>,
+    mut world_map: ResMut<WorldMapResource>,
+    mut focused: ResMut<FocusedBiome>,
+    mut cutoff: ResMut<LayerCutoff>,
     mut egui_wants: ResMut<EguiWantsPointer>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
@@ -44,7 +37,7 @@ pub fn egui_inspector(
 
     egui::Panel::left("inspector_left")
         .resizable(true)
-        .default_size(220.0)
+        .default_size(230.0)
         .show_inside(&mut viewport_ui, |ui| {
             ui.heading("Map Inspector");
             ui.separator();
@@ -55,47 +48,53 @@ pub fn egui_inspector(
                 ui.text_edit_singleline(&mut state.seed_input);
                 if ui.button("Go").clicked() {
                     if let Ok(s) = state.seed_input.trim().parse::<u64>() {
-                        state.seed  = s;
+                        state.seed = s;
                         world_map.0 = voxel_mapgen::generate(s);
                     }
                 }
             });
-            if ui.button("Random seed").clicked() {
-                let s = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_nanos() as u64)
-                    .unwrap_or(12345);
-                state.seed       = s;
-                state.seed_input = s.to_string();
-                world_map.0      = voxel_mapgen::generate(s);
-            }
+            ui.horizontal(|ui| {
+                if ui.button("Random seed").clicked() {
+                    let s = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(12345);
+                    state.seed = s;
+                    state.seed_input = s.to_string();
+                    world_map.0 = voxel_mapgen::generate(s);
+                }
+                if ui.button("Copy").clicked() {
+                    ctx.copy_text(state.seed.to_string());
+                }
+            });
             ui.separator();
 
-            // ── Layer cutoff ───────────────────────────────────────────────
-            ui.label("Layer cutoff (peel top-down)");
+            // ── Layer peel ────────────────────────────────────────────────
+            ui.label("Layer peel (hide upper cell layers)");
             let mut cut = cutoff.0 as u32;
-            if ui.add(egui::Slider::new(&mut cut, 1u32..=12).text("show z <")).changed() {
+            if ui
+                .add(egui::Slider::new(&mut cut, 1u32..=CELLS as u32).text("layers"))
+                .changed()
+            {
                 cutoff.0 = cut as u8;
             }
             ui.separator();
 
             // ── 6×6 biome selector ────────────────────────────────────────
-            ui.label("6x6 biome grid (click to focus)");
+            ui.label("6×6 biome grid (click to focus)");
             ui.label("legend: . grass  s sand  ~ water  # rock");
             egui::Grid::new("biome_grid")
                 .spacing([3.0, 3.0])
                 .show(ui, |ui| {
-                    for row in 0..6u8 {
-                        for col in 0..6u8 {
-                            let coord      = BiomeCoord::new(row, col);
-                            let bt         = world_map.0.biome_type(coord);
+                    for row in 0..WORLD_BIOMES as u8 {
+                        for col in 0..WORLD_BIOMES as u8 {
+                            let coord = BiomeCoord::new(row, col);
+                            let bt = world_map.0.biome_type(coord);
                             let is_focused = coord == focused.0;
-                            let label      = biome_char(bt).to_string();
-                            let btn = egui::Button::new(
-                                egui::RichText::new(label).monospace()
-                            )
-                            .selected(is_focused)
-                            .min_size(egui::vec2(22.0, 22.0));
+                            let label = biome_char(bt).to_string();
+                            let btn = egui::Button::new(egui::RichText::new(label).monospace())
+                                .selected(is_focused)
+                                .min_size(egui::vec2(22.0, 22.0));
                             if ui.add(btn).clicked() {
                                 focused.0 = coord;
                             }
@@ -107,22 +106,32 @@ pub fn egui_inspector(
 
             // ── Focused biome info ────────────────────────────────────────
             let bt = world_map.0.biome_type(focused.0);
-            let c  = &world_map.0.connections;
             ui.label(format!(
                 "Focused: ({},{}) — {}",
-                focused.0.row, focused.0.col, biome_label(bt)
+                focused.0.row,
+                focused.0.col,
+                bt.label()
             ));
             for dir in voxel_core::EdgeDir::all() {
-                let key = (focused.0, dir);
-                if let Some(conn) = c.get(&key) {
+                if let Some(conn) = world_map.0.connection(focused.0, dir) {
                     ui.label(format!(
                         "  {:?}: {} ({})",
                         dir,
-                        biome_label(conn.surface),
-                        if conn.compatible { "connected" } else { "blocked" }
+                        conn.surface.label(),
+                        if conn.compatible {
+                            "connected"
+                        } else {
+                            "blocked"
+                        }
                     ));
                 }
             }
+            ui.separator();
+
+            // ── Cell → voxel expansion preview (dev aid) ──────────────────
+            ui.collapsing("Cell → voxel patterns", |ui| {
+                expansion_preview(ui);
+            });
             ui.separator();
 
             // ── Export ────────────────────────────────────────────────────
@@ -138,38 +147,105 @@ pub fn egui_inspector(
             ui.label("Camera: drag=orbit  scroll=zoom  mid=pan");
         });
 
-    // ── Voxel inspector (right float) ────────────────────────────────────────
-    if let Some((vx, vy, vz)) = state.hovered_voxel {
-        egui::Window::new("Voxel")
+    // ── Cell inspector (right float) ─────────────────────────────────────────
+    if let Some((cx, cy, cz)) = state.hovered_cell {
+        egui::Window::new("Cell")
             .anchor(egui::Align2::RIGHT_TOP, [-10.0, 10.0])
             .collapsible(false)
             .show(ctx, |ui| {
-                ui.label(format!("Local  ({vx}, {vy}, {vz})"));
-                let wx = focused.0.col as u16 * 12 + vx as u16;
-                let wy = focused.0.row as u16 * 12 + vy as u16;
-                ui.label(format!("World  ({wx}, {wy}, layer {})", vz + 1));
+                let grid = world_map.0.biome(focused.0);
+                let cell = grid.get(cx, cy, cz);
 
-                let band = match vz {
-                    0..=4 => "Underground (layers 1-5)",
-                    5     => "Surface (layer 6)",
-                    _     => "Relief (layers 7-12)",
+                ui.label(format!("Local  ({cx}, {cy}, {cz})"));
+                let wx = focused.0.col as u16 * CELLS as u16 + cx as u16;
+                let wy = focused.0.row as u16 * CELLS as u16 + cy as u16;
+                ui.label(format!("World  ({wx}, {wy})  cell layer {}", cz + 1));
+
+                let band = if cz < SURFACE_Z {
+                    "Underground (layers 1–5)"
+                } else if cz == SURFACE_Z {
+                    "Surface (layer 6)"
+                } else {
+                    "Relief (layers 7–12)"
                 };
                 ui.label(band);
-
-                let grid  = world_map.0.biome(focused.0);
-                let voxel = grid.get(vx, vy, vz);
-                let mat_s = match voxel.material {
-                    Material::Air         => "Air".to_string(),
-                    Material::Ground(bt)  => format!("Ground({:?})", bt),
-                    Material::Underground => "Underground".to_string(),
+                ui.label(format!("Type: {}", cell.label()));
+                match cell.resource() {
+                    Some(res) => ui.label(format!("Resource: {res:?}")),
+                    None => ui.label("Resource: —"),
                 };
-                ui.label(format!("Material: {mat_s}"));
-                if let Some(e) = voxel.element {
-                    ui.label(format!("Element: {:?}", e));
-                }
             });
     }
 
     egui_wants.0 = ctx.egui_wants_pointer_input();
     Ok(())
+}
+
+/// Draws each cell type's 4-voxel column (exposed and covered variants) so
+/// palette/pattern tweaks are reviewable without regenerating a map.
+fn expansion_preview(ui: &mut egui::Ui) {
+    const TYPES: [CellType; 6] = [
+        CellType::Soil,
+        CellType::Sand,
+        CellType::Water,
+        CellType::Stone,
+        CellType::Gold,
+        CellType::Iron,
+    ];
+
+    ui.label("columns: exposed / covered (top voxel uppermost)");
+    egui::Grid::new("expansion_preview")
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            for cell in TYPES {
+                ui.label(cell.label());
+                // Use the snow band for stone so the exposed variant shows
+                // the snow cap.
+                let cz = if cell == CellType::Stone {
+                    SNOW_Z
+                } else {
+                    SURFACE_Z
+                };
+                column_swatch(ui, cell_column(cell, true, cz));
+                column_swatch(ui, cell_column(cell, false, cz));
+                ui.end_row();
+            }
+        });
+}
+
+fn column_swatch(ui: &mut egui::Ui, column: [VoxelKind; SUB]) {
+    let cell_px = 11.0;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(cell_px, cell_px * SUB as f32),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    for (dz, kind) in column.iter().enumerate() {
+        // dz=0 is the bottom voxel — draw it lowest.
+        let top = rect.bottom() - (dz as f32 + 1.0) * cell_px;
+        let r =
+            egui::Rect::from_min_size(egui::pos2(rect.left(), top), egui::vec2(cell_px, cell_px));
+        match kind {
+            VoxelKind::Air => {
+                painter.rect_stroke(
+                    r.shrink(1.0),
+                    0.0,
+                    egui::Stroke::new(0.6, egui::Color32::GRAY),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            k => {
+                let [cr, cg, cb] = base_color_srgb(*k);
+                painter.rect_filled(
+                    r.shrink(0.5),
+                    0.0,
+                    egui::Color32::from_rgb(
+                        (cr * 255.0) as u8,
+                        (cg * 255.0) as u8,
+                        (cb * 255.0) as u8,
+                    ),
+                );
+            }
+        }
+    }
 }

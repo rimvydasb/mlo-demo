@@ -46,11 +46,17 @@ pub fn compute_connections(
                 let compatible = my_type == nb;
                 map.insert(
                     (coord, EdgeDir::East),
-                    Connection { compatible, surface: my_type },
+                    Connection {
+                        compatible,
+                        surface: my_type,
+                    },
                 );
                 map.insert(
                     (BiomeCoord::new(row as u8, col as u8 + 1), EdgeDir::West),
-                    Connection { compatible, surface: nb },
+                    Connection {
+                        compatible,
+                        surface: nb,
+                    },
                 );
             }
 
@@ -60,11 +66,17 @@ pub fn compute_connections(
                 let compatible = my_type == nb;
                 map.insert(
                     (coord, EdgeDir::South),
-                    Connection { compatible, surface: my_type },
+                    Connection {
+                        compatible,
+                        surface: my_type,
+                    },
                 );
                 map.insert(
                     (BiomeCoord::new(row as u8 + 1, col as u8), EdgeDir::North),
-                    Connection { compatible, surface: nb },
+                    Connection {
+                        compatible,
+                        surface: nb,
+                    },
                 );
             }
         }

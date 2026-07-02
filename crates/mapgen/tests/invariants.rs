@@ -1,5 +1,10 @@
-use voxel_core::{BiomeCoord, EdgeDir, Material};
+//! Cell-tier invariants for `mapgen::generate`. Runs headless — no GPU.
+
+use voxel_core::{BiomeCoord, BiomeType, CellType, EdgeDir, CELLS, SURFACE_Z};
 use voxel_mapgen::generate;
+
+const MAX: u8 = CELLS as u8;
+const EDGE: u8 = MAX - 1;
 
 // ── Determinism ──────────────────────────────────────────────────────────────
 
@@ -23,8 +28,8 @@ fn same_seed_deterministic() {
 fn different_seeds_differ() {
     let a = generate(0);
     let b = generate(1);
-    // At least one biome should differ
-    let any_diff = (0..6u8).flat_map(|r| (0..6u8).map(move |c| BiomeCoord::new(r, c)))
+    let any_diff = (0..6u8)
+        .flat_map(|r| (0..6u8).map(move |c| BiomeCoord::new(r, c)))
         .any(|coord| a.biome(coord) != b.biome(coord));
     assert!(any_diff, "seeds 0 and 1 produced identical maps");
 }
@@ -33,50 +38,85 @@ fn different_seeds_differ() {
 
 fn check_biome_invariants(map: &voxel_mapgen::WorldMap, coord: BiomeCoord) {
     let grid = map.biome(coord);
+    let bt = map.biome_type(coord);
     let label = format!("biome ({},{})", coord.row, coord.col);
 
-    for vy in 0u8..12 {
-        for vx in 0u8..12 {
-            // Underground z=0..4: must be Underground material, may have element
-            for vz in 0u8..5 {
-                let v = grid.get(vx, vy, vz);
-                assert_eq!(
-                    v.material, Material::Underground,
-                    "{label} ({vx},{vy},{vz}) underground must be Underground"
-                );
-            }
+    for y in 0..MAX {
+        for x in 0..MAX {
+            let is_edge = x == 0 || x == EDGE || y == 0 || y == EDGE;
 
-            // Surface z=5: must be Ground(…), no element
-            {
-                let v = grid.get(vx, vy, 5);
+            // Underground (z = 0..5): funnel of deposits hanging from the
+            // surface. Gold/iron never appear elsewhere.
+            for z in 0..SURFACE_Z {
+                let c = grid.get(x, y, z);
                 assert!(
-                    matches!(v.material, Material::Ground(_)),
-                    "{label} ({vx},{vy},5) surface must be Ground"
+                    matches!(
+                        c,
+                        CellType::Air
+                            | CellType::Soil
+                            | CellType::Stone
+                            | CellType::Gold
+                            | CellType::Iron
+                    ),
+                    "{label} ({x},{y},{z}) unexpected underground cell {c:?}"
                 );
-                assert_eq!(v.element, None, "{label} ({vx},{vy},5) surface must have no element");
-            }
-
-            // Above-ground z=6..11: must NOT have elements; must be Air or Ground
-            for vz in 6u8..12 {
-                let v = grid.get(vx, vy, vz);
-                assert_eq!(
-                    v.element, None,
-                    "{label} ({vx},{vy},{vz}) above-ground must have no element"
-                );
-                assert!(
-                    matches!(v.material, Material::Air | Material::Ground(_)),
-                    "{label} ({vx},{vy},{vz}) above-ground must be Air or Ground"
-                );
-            }
-
-            // No floating voxels: solid at z => solid at z-1 (down to z=6)
-            for vz in 7u8..12 {
-                let above = grid.get(vx, vy, vz);
-                let below = grid.get(vx, vy, vz - 1);
-                if above.material != Material::Air {
+                // Hangs from above: solid here ⇒ solid one layer up.
+                if c != CellType::Air {
                     assert_ne!(
-                        below.material, Material::Air,
-                        "{label} ({vx},{vy},{vz}) floating voxel: solid above Air"
+                        grid.get(x, y, z + 1),
+                        CellType::Air,
+                        "{label} ({x},{y},{z}) underground cell has no support above"
+                    );
+                }
+            }
+
+            // Surface (z = 5): always solid, typed by the biome; ponds only
+            // in grass/sand interiors, and the edge ring is always pure.
+            {
+                let c = grid.get(x, y, SURFACE_Z);
+                assert_ne!(
+                    c,
+                    CellType::Air,
+                    "{label} ({x},{y},5) surface must be solid"
+                );
+                if is_edge {
+                    assert_eq!(
+                        c,
+                        bt.surface_cell(),
+                        "{label} ({x},{y},5) edge ring must match biome surface type"
+                    );
+                } else {
+                    let pond_ok =
+                        c == CellType::Water && matches!(bt, BiomeType::Grass | BiomeType::Sand);
+                    assert!(
+                        c == bt.surface_cell() || pond_ok,
+                        "{label} ({x},{y},5) unexpected surface cell {c:?}"
+                    );
+                }
+            }
+
+            // Relief (z = 6..12): soil/sand/stone columns, no resources, no
+            // floating cells, flat on the edge ring and over water.
+            for z in SURFACE_Z + 1..MAX {
+                let c = grid.get(x, y, z);
+                assert!(
+                    matches!(
+                        c,
+                        CellType::Air | CellType::Soil | CellType::Sand | CellType::Stone
+                    ),
+                    "{label} ({x},{y},{z}) unexpected relief cell {c:?}"
+                );
+                if c != CellType::Air {
+                    assert!(!is_edge, "{label} ({x},{y},{z}) relief on the edge ring");
+                    assert_ne!(
+                        grid.get(x, y, SURFACE_Z),
+                        CellType::Water,
+                        "{label} ({x},{y},{z}) relief above a water surface"
+                    );
+                    assert_ne!(
+                        grid.get(x, y, z - 1),
+                        CellType::Air,
+                        "{label} ({x},{y},{z}) floating relief cell"
                     );
                 }
             }
@@ -85,49 +125,95 @@ fn check_biome_invariants(map: &voxel_mapgen::WorldMap, coord: BiomeCoord) {
 }
 
 fn check_edge_continuity(map: &voxel_mapgen::WorldMap) {
-    // For each compatible east-west border: layer-6 strip must match material
+    // Compatible east-west borders: the layer-6 strips must match cell-for-cell.
     for row in 0..6u8 {
         for col in 0..5u8 {
-            let left  = BiomeCoord::new(row, col);
+            let left = BiomeCoord::new(row, col);
             let right = BiomeCoord::new(row, col + 1);
-            let conn  = map.connection(left, EdgeDir::East);
-            if !conn.map(|c| c.compatible).unwrap_or(false) { continue; }
+            let conn = map.connection(left, EdgeDir::East);
+            if !conn.map(|c| c.compatible).unwrap_or(false) {
+                continue;
+            }
 
             let lg = map.biome(left);
             let rg = map.biome(right);
-            for vy in 0u8..12 {
-                let lv = lg.get(11, vy, 5); // east edge of left biome
-                let rv = rg.get(0,  vy, 5); // west edge of right biome
+            for y in 0..MAX {
                 assert_eq!(
-                    lv.material, rv.material,
-                    "edge continuity fail H ({row},{col})|({row},{}) vy={vy}",
+                    lg.get(EDGE, y, SURFACE_Z),
+                    rg.get(0, y, SURFACE_Z),
+                    "edge continuity fail H ({row},{col})|({row},{}) y={y}",
                     col + 1
                 );
             }
         }
     }
 
-    // For each compatible north-south border
+    // Compatible north-south borders.
     for row in 0..5u8 {
         for col in 0..6u8 {
-            let top    = BiomeCoord::new(row, col);
+            let top = BiomeCoord::new(row, col);
             let bottom = BiomeCoord::new(row + 1, col);
-            let conn   = map.connection(top, EdgeDir::South);
-            if !conn.map(|c| c.compatible).unwrap_or(false) { continue; }
+            let conn = map.connection(top, EdgeDir::South);
+            if !conn.map(|c| c.compatible).unwrap_or(false) {
+                continue;
+            }
 
             let tg = map.biome(top);
             let bg = map.biome(bottom);
-            for vx in 0u8..12 {
-                let tv = tg.get(vx, 11, 5); // south edge of top biome
-                let bv = bg.get(vx, 0,  5); // north edge of bottom biome
+            for x in 0..MAX {
                 assert_eq!(
-                    tv.material, bv.material,
-                    "edge continuity fail V ({row},{col})|({},{col}) vx={vx}",
+                    tg.get(x, EDGE, SURFACE_Z),
+                    bg.get(x, 0, SURFACE_Z),
+                    "edge continuity fail V ({row},{col})|({},{col}) x={x}",
                     row + 1
                 );
             }
         }
     }
+}
+
+fn check_resource_rarity(map: &voxel_mapgen::WorldMap) {
+    // Spec: of solid underground cells — stone ≥ 30%, iron ~10%, gold ~5%.
+    // Bounds are loose: a single map is a small sample.
+    let mut solid = 0u32;
+    let mut stone = 0u32;
+    let mut iron = 0u32;
+    let mut gold = 0u32;
+    for row in 0..6u8 {
+        for col in 0..6u8 {
+            let grid = map.biome(BiomeCoord::new(row, col));
+            for z in 0..SURFACE_Z {
+                for y in 0..MAX {
+                    for x in 0..MAX {
+                        match grid.get(x, y, z) {
+                            CellType::Air => {}
+                            c => {
+                                solid += 1;
+                                match c {
+                                    CellType::Stone => stone += 1,
+                                    CellType::Iron => iron += 1,
+                                    CellType::Gold => gold += 1,
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let pct = |n: u32| n as f64 / solid as f64 * 100.0;
+    assert!(pct(stone) >= 30.0, "stone {:.1}% < 30%", pct(stone));
+    assert!(
+        (4.0..=20.0).contains(&pct(iron)),
+        "iron {:.1}% out of range",
+        pct(iron)
+    );
+    assert!(
+        (1.5..=12.0).contains(&pct(gold)),
+        "gold {:.1}% out of range",
+        pct(gold)
+    );
 }
 
 // ── Deterministic tests ───────────────────────────────────────────────────────
@@ -150,6 +236,11 @@ fn edge_continuity_seed42() {
 #[test]
 fn edge_continuity_seed0() {
     check_edge_continuity(&generate(0));
+}
+
+#[test]
+fn resource_rarity_seed42() {
+    check_resource_rarity(&generate(42));
 }
 
 // ── Property tests (proptest) ─────────────────────────────────────────────────

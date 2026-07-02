@@ -83,7 +83,7 @@ auto-resolves.
 A cell **is** its resource where one exists — there is no separate element field.
 
 | Cell Type | Band                  | Resource | Notes                                          |
-| --------- | --------------------- | -------- | ---------------------------------------------- |
+|-----------|-----------------------|----------|------------------------------------------------|
 | soil      | Any                   | —        | Dirt; grows a grass top voxel layer if exposed |
 | sand      | Surface, relief       | —        | Beach yellow                                   |
 | water     | Surface               | water    | Translucent, sunken surface                    |
@@ -98,7 +98,7 @@ stone cells at cell layer ≥ 11 (`voxel-core::SNOW_Z`).
 ### Biome anatomy (Z axis in cells, layer 1 = bottom, `z` = layer − 1)
 
 | Layers | Band        | Contents                                                                                                   |
-| ------ | ----------- | ---------------------------------------------------------------------------------------------------------- |
+|--------|-------------|------------------------------------------------------------------------------------------------------------|
 | 1–5    | Underground | Floating-island funnel of soil salted with resource deposits. Tapers toward the bottom tip.                |
 | 6      | Surface     | Always solid, typed by the biome. Interior ponds in grass/sand biomes. Edge strips are flat and typed.     |
 | 7–12   | Above       | Relief: rolling hills + sparse mountain peaks, otherwise air. Cosmetic + line-of-sight flavor; no gameplay |
@@ -167,7 +167,7 @@ The expansion is a pure function of the cell grid, the inspector's layer cutoff,
 exactly like natural terrain).
 
 | Cell Type | Rule                     | Voxel column (bottom → top)           |
-| --------- | ------------------------ | ------------------------------------- |
+|-----------|--------------------------|---------------------------------------|
 | soil      | Top Z == air             | dirt, dirt, dirt, **grass**           |
 | soil      | Top Z != air             | dirt ×4                               |
 | sand      | Top Z == air             | sand ×3, **air** (sunken)             |
@@ -215,7 +215,7 @@ Each rule lives at exactly one tier. This matters because the LLM implementing t
 and mixing tiers breaks headless testing.
 
 | Rule            | Tier               | Owning crate | Signature site                                       | Touches sim/mapgen data?  |
-| --------------- | ------------------ | ------------ | ---------------------------------------------------- | ------------------------- |
+|-----------------|--------------------|--------------|------------------------------------------------------|---------------------------|
 | CLIFF FRACTURES | render — expansion | `render`     | expansion returns fewer voxels on exposed side faces | no                        |
 | SLOPES          | render — expansion | `render`     | expansion returns fewer voxels toward lower neighbor | no                        |
 | GRASS OVERHANG  | render — expansion | `render`     | expansion writes grass voxels on side faces          | no                        |
@@ -413,7 +413,7 @@ billboard sprites — but the voxel-cube look is the whole point.
 ### What I'm not adding, and why
 
 | Idea from state-of-the-art voxel work | Verdict for this project    | Why                                                                                                |
-| ------------------------------------- | --------------------------- | -------------------------------------------------------------------------------------------------- |
+|---------------------------------------|-----------------------------|----------------------------------------------------------------------------------------------------|
 | Marching cubes / SDF terrain          | Skip                        | Kills the cubic voxel identity that is the whole aesthetic.                                        |
 | Greedy meshing                        | Later, if the profiler asks | At 48³ per biome with only one focused biome meshed in full, current mesher is not the bottleneck. |
 | Voxel raytracing (Teardown-style)     | Skip                        | Doesn't fit the WASM+wgpu target this decade.                                                      |
@@ -438,7 +438,7 @@ billboard sprites — but the voxel-cube look is the whole point.
 ### Material palette (sRGB, authored against the reference art)
 
 | VoxelKind | sRGB               | Jitter |
-| --------- | ------------------ | ------ |
+|-----------|--------------------|--------|
 | grass     | (0.36, 0.70, 0.22) | 0.13   |
 | dirt      | (0.56, 0.36, 0.22) | 0.10   |
 | sand      | (0.89, 0.80, 0.55) | 0.06   |

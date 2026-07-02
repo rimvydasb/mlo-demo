@@ -16,7 +16,7 @@ The pipeline is split so each concern lives in exactly one place, mirroring the 
 split. Extending one tier (new model, new placement rule, new animation) never touches the other two.
 
 | Tier                | Crate / module        | Responsibility                                                                       | Engine-coupled?                     |
-| ------------------- | --------------------- | ------------------------------------------------------------------------------------ | ----------------------------------- |
+|---------------------|-----------------------|--------------------------------------------------------------------------------------|-------------------------------------|
 | Catalog + placement | `voxel-render::decor` | What kinds exist, which models they use, deterministic planning of what stands where | No ECS, no assets (pure + testable) |
 | Asset management    | `voxel-app::assets`   | Workspace asset root, GLB scene handles, load tracking, palette harmonization        | Bevy `AssetServer`                  |
 | Scene + animation   | `voxel-app::decor`    | Spawning planned instances as entities, despawn on rebuild, idle animations          | Bevy ECS systems                    |
@@ -45,7 +45,7 @@ every platform, and independent of biome generation order. Rule-id blocks (each 
 jitter ×2, scale, phase):
 
 | Rule block  | Id   | Notes                                                      |
-| ----------- | ---- | ---------------------------------------------------------- |
+|-------------|------|------------------------------------------------------------|
 | beautify    | 1–5  | see rendering.md                                           |
 | BEACHES     | 6    | mapgen tier                                                |
 | caves       | 8–46 | underground cave pockets (rendering.md, underside erosion) |
@@ -98,7 +98,7 @@ assets/
   through untouched. GLB materials are shared per asset, so one retint covers all instances.
 
 | Source color (linear) | Kenney name  | Retint target (sRGB) |
-| --------------------- | ------------ | -------------------- |
+|-----------------------|--------------|----------------------|
 | (0.161, 0.788, 0.671) | `leafsGreen` | (0.33, 0.68, 0.22)   |
 | (0.169, 0.651, 0.667) | `leafsDark`  | (0.22, 0.52, 0.19)   |
 | (0.173, 0.847, 0.722) | `grass`      | (0.41, 0.75, 0.26)   |
@@ -111,7 +111,7 @@ Kinds, their model variants, and where they may stand. "Grass top" = an exposed 
 with grass voxels) — placement is cell-tier, so beach sand and pond water made by mapgen are seen correctly.
 
 | Kind       | Variants                                                | Stands on               | Extra placement constraints                                                           |
-| ---------- | ------------------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------- |
+|------------|---------------------------------------------------------|-------------------------|---------------------------------------------------------------------------------------|
 | Tree       | tree_default, tree_oak, tree_pineDefaultA, tree_simple  | soil (grass) tops       | interior only (off the edge ring); local-flat (no higher 8-neighbour)                 |
 | Palm       | tree_palm, tree_palmShort, tree_palmTall, tree_palmBend | sand tops **only**      | interior only; local-flat                                                             |
 | Flower     | flower\_{purple,red,yellow}{A,C}                        | soil (grass) tops       | —                                                                                     |
@@ -124,7 +124,7 @@ with grass voxels) — placement is cell-tier, so beach sand and pond water made
 Animals pick their variant from the habitat group of the cell they stand on:
 
 | Habitat  | Top cell type       | Animals                           |
-| -------- | ------------------- | --------------------------------- |
+|----------|---------------------|-----------------------------------|
 | Meadow   | soil (grass top)    | bunny, fox, deer, pig, chick, cow |
 | Beach    | sand                | crab, parrot                      |
 | Mountain | stone / gold / iron | penguin, polar bear               |
@@ -135,7 +135,7 @@ At most **one decoration per cell**: flora and fish are planned first (first mat
 free cells in a second pass — which is what lets tree positions boost animal density nearby.
 
 | Kind             | Probability            | Notes                                                    |
-| ---------------- | ---------------------- | -------------------------------------------------------- |
+|------------------|------------------------|----------------------------------------------------------|
 | Tree             | 0.06                   |                                                          |
 | Palm             | 0.06                   |                                                          |
 | Flower           | 0.10                   | rolled only where no tree landed                         |
@@ -152,7 +152,7 @@ stay on the flat inner 2×2 voxels that the slope/fracture passes never carve). 
 visual patterns:
 
 | Top cell    | Anchor Y above cell base | Why                                                 |
-| ----------- | ------------------------ | --------------------------------------------------- |
+|-------------|--------------------------|-----------------------------------------------------|
 | soil, stone | 1.0                      | grass/snow/stone top is flush with the cell top     |
 | sand        | 0.75                     | sand tops render one voxel sunken                   |
 | water       | 0.05                     | fish anchor near the floor; water surface is at 0.5 |
@@ -169,7 +169,7 @@ animation, matching the chunky diorama style. Every instance carries a planner-h
 never move in lockstep.
 
 | Motion | Kinds        | Behaviour                                                                                         |
-| ------ | ------------ | ------------------------------------------------------------------------------------------------- |
+|--------|--------------|---------------------------------------------------------------------------------------------------|
 | Still  | all flora    | none (wind sway is a possible future extension — add a `Motion::Sway` arm)                        |
 | Hop    | land animals | small parabolic hop (≤ 0.16 world units) once per 2.2–4 s cycle, plus a lazy look-around yaw sway |
 | Swim   | fish         | one lap of a 0.15-radius circle every 12–20 s, gentle vertical bob, nose along the swim tangent   |

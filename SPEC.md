@@ -10,7 +10,7 @@ WebAssembly + wgpu (web). Future: iOS. Development is LLM-assisted (Claude CLI) 
 - **Biome** — a 12×12×12 cells, the atomic unit of the world. Biomes are arranged in a 6×6 grid.
 - **World** — the 6×6 grid of biomes. Each match happens in one world.
 - **Era** — a technological age assigned to each biome. Biomes can be in different eras at the same time.
-- **Cell** — the logical unit of gameplay: one type (grass, sand, water, rock, dirt, air), holds at most one resource,
+- **Cell** — the logical unit of gameplay: one type (grass, sand, water, stone, dirt, air), holds at most one resource,
   mined by one miner, built on by one building. 12³ cells per biome.
 - **Voxel** or **Terrain voxel** — the visual sub-unit a cell expands into at render time. Purely cosmetic; no gameplay
   semantics. 4³ voxels per cell.
@@ -56,7 +56,6 @@ function `cell_type → 4×4×4 voxel pattern` that lives in `render`. `mapgen` 
 | soil      | Any                  | Grass on top, dirt below. | None          |
 | sand      | Surface              | All "beach yellow" sand.  | None          |
 | water     | Surface, Underground | Blue, transparent 50%.    | water         |
-| water     | Surface, Underground | Blue, transparent 50%.    | water         |
 | stone     | Any                  | Gray stone.               | stone         |
 | gold      | Underground          | Yellow stone.             | gold          |
 | iron      | Underground          | Reddish stone.            | iron          |
@@ -93,7 +92,7 @@ layers along Z.
 ### Connections
 
 - Adjacent biomes connect **only at cell layer 6**, by **surface-type match** (water↔water, sand↔sand, grass↔grass,
-  rock↔rock). Incompatible neighbors have **no connection**.
+  stone↔stone). Incompatible neighbors have **no connection**.
 - The connecting edge strip is **flat** (no relief) so movement across it is clean.
 - **Gameplay role of connection type (proposed, tunable):** edge type gates which armies may cross. Land types are
   crossable by land armies; **water connections require naval- or air-capable units** (a later tech tier).
@@ -237,7 +236,7 @@ The render crate consumes the logical cell grid produced by `mapgen` and turns i
     - **Grass:** 3 voxel layers of dirt + 1 top layer of green.
     - **Sand:** 4 voxel layers of sand.
     - **Water:** 2 bottom layers of water + 2 top layers of air (open surface).
-    - **Rock:** 4 voxel layers of stone.
+    - **Stone:** 4 voxel layers of stone.
     - **Dirt / underground:** 4 voxel layers of dirt/element-tinted stone.
     - **Air:** empty. Keeping the outer shape uniform avoids Z-stacking special cases at cell boundaries and keeps the
       cell-layer-6 edge strip cleanly flat.
@@ -257,7 +256,20 @@ The render crate consumes the logical cell grid produced by `mapgen` and turns i
 - **Orthographic fixed-angle camera** for the isometric diorama look; also simplifies biome and cell picking (uniform
   pick-ray direction). Picking resolves to a **cell**, not a voxel — voxels have no gameplay identity.
 
-### 12.3 Determinism of expansion
+### 12.3 Lighting & atmosphere
+
+- **Soft shadows.** The scene's single `DirectionalLight` casts soft-edged shadows (Bevy's soft/PCF shadow maps,
+  `shadow_maps_enabled = true`), not hard-edged ones, so the focused biome reads as a physical diorama rather than a
+  flat cutout. Shadow resolution only needs to cover the single in-view biome (48³ voxels + decoration meshes), not the
+  full 6×6 grid.
+- **Very light fog.** A subtle distance fog (Bevy's `DistanceFog` component, low density) is applied outward from the
+  camera. The fixed-angle orthographic camera has no natural perspective depth cue, so this faint fog is the primary way
+  distance reads visually — it should fade the dimmed silhouette proxies of the other 35 biomes slightly more than the
+  focused biome, while staying light enough that nothing becomes illegible.
+- Both are **purely cosmetic**: they affect `render`/`app` only and have no bearing on `mapgen`/`sim` determinism or the
+  cell-tier invariant tests in §17.6.
+
+### 12.4 Determinism of expansion
 
 `expand` is pure. The same cell type and (where used) cell coordinates always produce the same voxel block and the same
 decoration placements. This keeps the render-time PNG snapshots in §17.6 stable across runs.
@@ -323,7 +335,7 @@ Front-loads the pure, testable crates — ideal for LLM-assisted dev against a s
 - **Voxel resolution per cell.** 4³ is the v1 choice. If terrain looks too coarse in practice, bump to 8³ — `expand` is
   the only function that changes. Doing this later is cheap by design.
 - **Per-cell sub-voxel variation.** v1: cells of the same type expand identically. Later: hash on cell coordinates to
-  add micro-variation (tufts of grass, rock cracks) without touching `mapgen` or `sim`.
+  add micro-variation (tufts of grass, stone cracks) without touching `mapgen` or `sim`.
 
 ---
 
@@ -427,7 +439,7 @@ no floating cells; height within bounds.
 **Text projection (channel 2), example — cell layer 6 top-down of one biome:**
 
 ```
-legend: . grass   s sand   ~ water   # rock
+legend: . grass   s sand   ~ water   # stone
 ~~~~ssss....
 ~~~~ssss....
 ~~~~ssss....

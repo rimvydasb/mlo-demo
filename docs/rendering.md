@@ -73,15 +73,16 @@ function `cell_type → 4×4×4 voxel pattern` that lives in `render`. `mapgen` 
 
 ### Cell Types
 
-| Cell Type | Band                 | Rendering Notes           | Resource Name |
-| --------- | -------------------- | ------------------------- | ------------- |
-| soil      | Any                  | Grass on top, dirt below. | None          |
-| sand      | Surface              | All "beach yellow" sand.  | None          |
-| water     | Surface, Underground | Blue, transparent 50%.    | water         |
-| stone     | Any                  | Gray stone.               | stone         |
-| gold      | Underground          | Yellow stone.             | gold          |
-| iron      | Underground          | Reddish stone.            | iron          |
-| air       | Above-ground         | Empty space.              | None          |
+| Cell Type | Band                                 | Rendering Notes                                                                                             | Resource Name |
+| --------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------------- | ------------- |
+| soil      | Any                                  | Grass on top, dirt below.                                                                                   | None          |
+| sand      | Surface                              | All "beach yellow" sand.                                                                                    | None          |
+| water     | Surface, Underground                 | Blue, transparent 50%.                                                                                      | water         |
+| stone     | Any                                  | Gray stone.                                                                                                 | stone         |
+| gold      | Underground                          | Yellow stone.                                                                                               | gold          |
+| iron      | Underground                          | Reddish stone.                                                                                              | iron          |
+| air       | Above-ground                         | Empty space.                                                                                                | None          |
+| snow      | Relief (cell layer ≥ 11), stone only | White cap on tall stone peaks; cosmetic top-voxel layer, not a full-depth cell type — see § Relief Shading. | None          |
 
 ### Material Palette (from reference art)
 

@@ -6254,6 +6254,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "bevy_egui",
+ "rand 0.8.6",
  "voxel-core",
  "voxel-mapgen",
  "voxel-render",
@@ -6285,6 +6286,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "voxel-core",
+ "voxel-mapgen",
 ]
 
 [[package]]

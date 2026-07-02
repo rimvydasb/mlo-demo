@@ -1,7 +1,9 @@
+mod clouds;
 mod inspector;
 mod picking;
 pub mod state;
 
+pub use clouds::{CloudsEnabled, CloudsPlugin};
 pub use state::{scenic_biome, InspectorState, WorldMapResource};
 
 use bevy::ecs::message::MessageWriter;
@@ -12,16 +14,48 @@ use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 use voxel_core::{BiomeCoord, WORLD_BIOMES};
 use voxel_render::{
     build_biome_meshes, expand, proxy_material, proxy_world_offset, terrain_material,
-    water_material, EguiWantsPointer, FocusedBiome, InspectorCamera, LayerCutoff, RenderPlugin,
-    SceneEntities,
+    water_material, BeautifyOptions, EguiWantsPointer, FocusedBiome, InspectorCamera, LayerCutoff,
+    RenderPlugin, SceneEntities,
 };
 
 // ── Public entry points ───────────────────────────────────────────────────────
 
+/// Presentation toggles shared by the inspector and the screenshot runner.
+#[derive(Clone, Copy)]
+pub struct AppOptions {
+    /// Drifting clouds over the focused biome. Intentionally
+    /// non-deterministic — disable for byte-stable screenshots.
+    pub clouds: bool,
+    /// The optional MICROHEIGHT beautification rule (A/B flag).
+    pub microheight: bool,
+}
+
+impl Default for AppOptions {
+    fn default() -> Self {
+        Self {
+            clouds: true,
+            microheight: false,
+        }
+    }
+}
+
+impl AppOptions {
+    fn beautify(self) -> BeautifyOptions {
+        BeautifyOptions {
+            microheight: self.microheight,
+        }
+    }
+}
+
 /// Headless-ish screenshot: opens a window, renders a few frames, captures
 /// via Bevy's Screenshot API, saves to `out`, then exits. Focuses `biome`,
 /// or the seed's most scenic biome when `None`.
-pub fn run_screenshot(seed: u64, out: std::path::PathBuf, biome: Option<BiomeCoord>) {
+pub fn run_screenshot(
+    seed: u64,
+    out: std::path::PathBuf,
+    biome: Option<BiomeCoord>,
+    opts: AppOptions,
+) {
     let mut app = App::new();
     app.add_plugins((
         DefaultPlugins.set(WindowPlugin {
@@ -34,12 +68,15 @@ pub fn run_screenshot(seed: u64, out: std::path::PathBuf, biome: Option<BiomeCoo
             ..default()
         }),
         RenderPlugin,
+        CloudsPlugin,
     ));
     let map = voxel_mapgen::generate(seed);
     let focus = biome.unwrap_or_else(|| scenic_biome(&map));
     app.insert_resource(FocusedBiome(focus))
         .insert_resource(WorldMapResource(map))
         .insert_resource(InspectorState::new(seed))
+        .insert_resource(CloudsEnabled(opts.clouds))
+        .insert_resource(opts.beautify())
         .insert_resource(ScreenshotOutPath(out))
         .add_systems(Update, (rebuild_scene, drive_screenshot))
         .run();
@@ -70,7 +107,7 @@ fn drive_screenshot(
     }
 }
 
-pub fn run_inspector(seed: u64) {
+pub fn run_inspector(seed: u64, opts: AppOptions) {
     let mut app = App::new();
     app.add_plugins((
         DefaultPlugins.set(WindowPlugin {
@@ -83,11 +120,14 @@ pub fn run_inspector(seed: u64) {
         }),
         EguiPlugin::default(),
         RenderPlugin,
+        CloudsPlugin,
     ));
     let map = voxel_mapgen::generate(seed);
     app.insert_resource(FocusedBiome(scenic_biome(&map)))
         .insert_resource(WorldMapResource(map))
         .insert_resource(InspectorState::new(seed))
+        .insert_resource(CloudsEnabled(opts.clouds))
+        .insert_resource(opts.beautify())
         .add_systems(EguiPrimaryContextPass, inspector::egui_inspector)
         .add_systems(
             Update,
@@ -121,6 +161,7 @@ fn rebuild_scene(
     focused: Res<FocusedBiome>,
     cutoff: Res<LayerCutoff>,
     state: Res<InspectorState>,
+    beautify: Res<BeautifyOptions>,
     mut scene: ResMut<SceneEntities>,
 ) {
     if !world_map.is_changed() && !focused.is_changed() && !cutoff.is_changed() {
@@ -149,7 +190,7 @@ fn rebuild_scene(
 
     // Focused biome: expand cells → voxels, mesh, spawn (opaque + water).
     let grid = world_map.0.biome(focused.0);
-    let volume = expand(grid, cutoff.0, focused.0, state.seed);
+    let volume = expand(grid, cutoff.0, focused.0, state.seed, *beautify);
     let built = build_biome_meshes(&volume, focused.0, state.seed);
 
     if let Some(mesh) = built.opaque {

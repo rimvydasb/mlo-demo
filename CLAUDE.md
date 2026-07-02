@@ -18,6 +18,8 @@ cargo run -p native -- inspect --seed 42
 # Headless PNG screenshot (opens window briefly, then exits)
 cargo xtask screenshot --seed 42 --out shot.png
 cargo xtask screenshot --seed 42 --row 3 --col 5 --out shot.png   # specific biome
+cargo xtask screenshot --seed 42 --no-clouds --out shot.png       # byte-stable (clouds are non-deterministic)
+cargo xtask screenshot --seed 42 --microheight --out shot.png     # A/B the optional MICROHEIGHT rule
 
 # ASCII top-down map dump (stdout, no window)
 cargo xtask dump --seed 42
@@ -70,8 +72,11 @@ This is the load-bearing separation of the whole codebase (see `docs/rendering.m
   `mapgen` and future `sim` code operate on cells only.
 - **Voxel** (`voxel-render::VoxelKind`, `VoxelVolume`): the cosmetic visual sub-unit. Each cell expands to 4×4×4 voxels
   at render time (48³ per biome) via `expansion.rs::cell_column` — grass tops on exposed soil, sunken water surfaces,
-  snow caps on tall stone (`SNOW_Z`), plus deterministic underside erosion for the floating-island look. Voxels never
-  leak out of `render`.
+  snow caps on tall stone (`SNOW_Z`), then the `beautify.rs` passes (SLOPES chamfers toward lower neighbors, CLIFF
+  FRACTURES on exposed faces, optional MICROHEIGHT, RETOP regrows grass/snow on carved tops, GRASS OVERHANG drapes a
+  green rim down cliff sides, GRASS TUFTS at ~8% coverage), plus deterministic underside erosion for the floating-island
+  look. Every random choice is `rule_hash01` (world voxel coords + per-rule discriminator). Voxels never leak out of
+  `render`.
 
 Snow is a `VoxelKind` only, **not** a `CellType`.
 
@@ -85,9 +90,9 @@ Snow is a `VoxelKind` only, **not** a `CellType`.
   are CCW; keep backface culling in mind if you touch it.
 - **Biome coordinates**: `BiomeCoord { row, col }`, row 0 = north, col 0 = west, 6×6 grid.
 
-## Mapgen: Two-Pass Generation
+## Mapgen: Three-Pass Generation
 
-`mapgen::generate(seed)` runs two sequential passes:
+`mapgen::generate(seed)` runs three sequential passes:
 
 1. **Macro pass** (`macro_pass.rs`): weighted-random `BiomeType` per biome, then `Connection` compatibility for all
    shared edges (compatible = same biome type on both sides).
@@ -101,8 +106,13 @@ Snow is a `VoxelKind` only, **not** a `CellType`.
    - z=6–11: relief = rolling hills + sparse high-frequency mountain peaks; fades flat within 3 cells of a border; water
      biomes and pond columns stay flat; columns ≥4 high become stone.
 
+3. **Beach pass** (`beach_pass.rs`): in grass biomes, flips soil surface cells to sand around large ponds (≥6 cells,
+   4-connected) — 92% at 1 step from water, 35% at 2 steps. Never on the edge ring, never under relief columns. This is
+   a cell-type change (mining/connections see sand), which is why it lives in mapgen, not render.
+
 RNG is `ChaCha8Rng::seed_from_u64(seed)` (macro pass only). Interior uses Perlin noise seeded via
-`derive_u32(seed, offset)`, so biome generation order can never affect results.
+`derive_u32(seed, offset)`; the beach pass uses a deterministic hash of world cell coords. Biome generation order can
+never affect results.
 
 **Never use `HashMap` for deterministic paths** — iteration order is non-deterministic. Use `BTreeMap` (already used for
 `WorldMap::connections`).
@@ -164,12 +174,15 @@ The mapgen invariant suite in `crates/mapgen/tests/invariants.rs` enforces (all 
 
 - Underground (z=0–4): only Air/Soil/Stone/Gold/Iron; every solid cell has a solid cell directly above (funnel hangs
   from the surface)
-- Surface (z=5): never Air; edge ring is exactly the biome's surface type; interior is surface type or (grass/sand only)
-  pond water
+- Surface (z=5): never Air; edge ring is exactly the biome's surface type; interior is surface type, (grass/sand only)
+  pond water, or (grass only) beach sand
 - Relief (z=6–11): only Air/Soil/Sand/Stone; no resources; no floating cells; flat on the edge ring and above water
 - Edge continuity: compatible borders match cell-for-cell along the shared layer-6 strip
+- Beach belt: sand in grass biomes always sits within 2 steps of surface water, never on the edge ring
 - Resource rarity: stone ≥30%, iron/gold within loose bounds around 10%/5%
 - Determinism: same seed → byte-identical grids (plus proptest over random seeds)
 
 Snapshots live in `crates/mapgen/tests/snapshots/`. Regenerate with `INSTA_UPDATE=always`. The render crate has its own
-unit tests for the expansion rules (grass tops, sunken water, snow caps, erosion determinism).
+unit tests for the expansion rules (grass tops, sunken water, snow caps, expansion determinism) and the beautification
+passes (slope chamfers, grass overhang, tuft coverage bounds, microheight flag, and a no-floating-voxels check above the
+erosion band over a real generated map).

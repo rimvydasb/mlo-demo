@@ -1,14 +1,17 @@
 //! Procedural world generation, cell tier only.
 //!
-//! `generate(seed)` runs two passes:
+//! `generate(seed)` runs three passes:
 //! 1. **Macro pass** — assigns a `BiomeType` to each of the 36 biomes and
 //!    computes edge `Connection`s (compatible = same type on both sides).
 //! 2. **Interior pass** — fills each biome's 12³ `CellGrid` from world-space
 //!    noise so fields continue seamlessly across borders.
+//! 3. **Beach pass** — flips soil to sand around large surface ponds (a sand
+//!    belt is a cell-type change, so it must happen here, not in render).
 //!
 //! No Bevy, no voxels: the cosmetic cell → voxel expansion lives in `render`.
 
 mod ascii;
+mod beach_pass;
 mod interior;
 mod macro_pass;
 
@@ -53,7 +56,9 @@ pub fn generate(seed: Seed) -> WorldMap {
         for col in 0..WORLD_BIOMES as u8 {
             let coord = BiomeCoord::new(row, col);
             let bt = biome_types[row as usize][col as usize];
-            biomes.push(interior::generate_biome(seed, coord, bt));
+            let mut grid = interior::generate_biome(seed, coord, bt);
+            beach_pass::apply_beaches(seed, coord, bt, &mut grid);
+            biomes.push(grid);
         }
     }
 

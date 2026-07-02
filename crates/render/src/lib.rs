@@ -1,10 +1,12 @@
 //! Bevy rendering for the biome inspector: cell→voxel expansion, meshing,
 //! camera, lighting, and the dimmed proxy tiles for unfocused biomes.
 
+mod beautify;
 mod camera;
 mod expansion;
 mod mesh;
 
+pub use beautify::{rule_hash01, BeautifyOptions};
 pub use camera::{CameraState, EguiWantsPointer, InspectorCamera};
 pub use expansion::{cell_column, expand, voxel_hash01, VoxelKind, VoxelVolume, SUB, VOX};
 pub use mesh::{base_color_linear, base_color_srgb, build_biome_meshes, BiomeMeshes, VOXEL_SIZE};
@@ -42,6 +44,7 @@ impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(FocusedBiome(BiomeCoord::new(0, 0)))
             .insert_resource(LayerCutoff(CELLS as u8))
+            .init_resource::<BeautifyOptions>()
             .insert_resource(EguiWantsPointer::default())
             .insert_resource(SceneEntities::default())
             .insert_resource(ClearColor(SKY_COLOR))

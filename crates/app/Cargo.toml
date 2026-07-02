@@ -9,3 +9,4 @@ voxel-mapgen = { workspace = true }
 voxel-render = { workspace = true }
 bevy         = { workspace = true }
 bevy_egui    = { workspace = true }
+rand         = { workspace = true }

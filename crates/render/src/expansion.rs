@@ -7,6 +7,8 @@
 
 use voxel_core::{BiomeCoord, CellGrid, CellType, CELLS, SNOW_Z, SURFACE_Z};
 
+use crate::beautify::BeautifyOptions;
+
 /// Voxels per cell edge.
 pub const SUB: usize = 4;
 /// Voxels per biome edge.
@@ -58,7 +60,7 @@ impl VoxelVolume {
     }
 
     #[inline]
-    fn set(&mut self, x: usize, y: usize, z: usize, k: VoxelKind) {
+    pub(crate) fn set(&mut self, x: usize, y: usize, z: usize, k: VoxelKind) {
         self.data[Self::idx(x, y, z)] = k;
     }
 
@@ -79,7 +81,17 @@ impl VoxelVolume {
 /// `cutoff` hides cell layers with z ≥ cutoff (the inspector's layer peel);
 /// peeled cells count as air, so freshly exposed soil grows a grass top just
 /// like natural terrain.
-pub fn expand(grid: &CellGrid, cutoff: u8, coord: BiomeCoord, seed: u64) -> VoxelVolume {
+///
+/// Pipeline: base cell → voxel patterns, then the beautification passes
+/// (slopes, cliff fractures, optional microheight, retop, grass overhang,
+/// grass tufts — see `beautify`), then the underside erosion.
+pub fn expand(
+    grid: &CellGrid,
+    cutoff: u8,
+    coord: BiomeCoord,
+    seed: u64,
+    opts: BeautifyOptions,
+) -> VoxelVolume {
     let mut vol = VoxelVolume::new();
     let max = CELLS as u8;
 
@@ -99,6 +111,11 @@ pub fn expand(grid: &CellGrid, cutoff: u8, coord: BiomeCoord, seed: u64) -> Voxe
             }
         }
     }
+
+    let ox = coord.col as i64 * VOX as i64;
+    let oy = coord.row as i64 * VOX as i64;
+    let ctx = crate::beautify::BeautifyCtx::new(grid, cutoff, ox, oy, seed);
+    crate::beautify::apply(&mut vol, &ctx, opts);
 
     erode_underside(&mut vol, coord, seed);
     vol
@@ -223,9 +240,22 @@ mod tests {
         g
     }
 
+    fn top_of(vol: &VoxelVolume, x: usize, y: usize) -> Option<(usize, VoxelKind)> {
+        (0..VOX)
+            .rev()
+            .find(|&z| vol.get(x, y, z) != VoxelKind::Air)
+            .map(|z| (z, vol.get(x, y, z)))
+    }
+
     #[test]
     fn soil_grows_grass_top_when_exposed() {
-        let vol = expand(&flat_soil_grid(), 12, BiomeCoord::new(0, 0), 1);
+        let vol = expand(
+            &flat_soil_grid(),
+            12,
+            BiomeCoord::new(0, 0),
+            1,
+            BeautifyOptions::default(),
+        );
         let top = SURFACE_Z as usize * SUB + SUB - 1;
         assert_eq!(vol.get(20, 20, top), VoxelKind::Grass);
         assert_eq!(vol.get(20, 20, top - 1), VoxelKind::Dirt);
@@ -234,18 +264,28 @@ mod tests {
     #[test]
     fn peeling_exposes_new_grass() {
         // Cut at cell layer 3: the top of cell z=2 becomes exposed soil → grass.
-        let vol = expand(&flat_soil_grid(), 3, BiomeCoord::new(0, 0), 1);
+        let vol = expand(
+            &flat_soil_grid(),
+            3,
+            BiomeCoord::new(0, 0),
+            1,
+            BeautifyOptions::default(),
+        );
         let top = 2 * SUB + SUB - 1;
         assert_eq!(vol.get(20, 20, top), VoxelKind::Grass);
-        // Nothing above the cutoff.
-        assert_eq!(vol.get(20, 20, 3 * SUB), VoxelKind::Air);
+        // Nothing above the cutoff except at most a 1-voxel grass tuft.
+        assert!(matches!(
+            vol.get(20, 20, 3 * SUB),
+            VoxelKind::Air | VoxelKind::Grass
+        ));
+        assert_eq!(vol.get(20, 20, 3 * SUB + 1), VoxelKind::Air);
     }
 
     #[test]
     fn exposed_water_is_sunken() {
         let mut g = flat_soil_grid();
         g.set(6, 6, SURFACE_Z, CellType::Water);
-        let vol = expand(&g, 12, BiomeCoord::new(0, 0), 1);
+        let vol = expand(&g, 12, BiomeCoord::new(0, 0), 1, BeautifyOptions::default());
         let base = SURFACE_Z as usize * SUB;
         assert_eq!(vol.get(25, 25, base), VoxelKind::Water);
         assert_eq!(vol.get(25, 25, base + 1), VoxelKind::Water);
@@ -259,19 +299,26 @@ mod tests {
         for z in SURFACE_Z + 1..12 {
             g.set(6, 6, z, CellType::Stone);
         }
-        let vol = expand(&g, 12, BiomeCoord::new(0, 0), 1);
-        let peak_top = 11 * SUB + SUB - 1;
-        assert_eq!(vol.get(25, 25, peak_top), VoxelKind::Snow);
+        let vol = expand(&g, 12, BiomeCoord::new(0, 0), 1, BeautifyOptions::default());
+        // The peak column may be chamfered by SLOPES/CLIFF FRACTURES, but
+        // whatever remains on top in the snow band must be snow (retop).
+        let (peak_z, peak_kind) = top_of(&vol, 25, 25).unwrap();
+        assert!(
+            peak_z >= SNOW_Z as usize * SUB,
+            "peak carved below snow band"
+        );
+        assert_eq!(peak_kind, VoxelKind::Snow);
         // Below the snow band it stays bare stone even where locally exposed.
         let low_top = 8 * SUB + SUB - 1;
         assert_eq!(vol.get(25, 25, low_top), VoxelKind::Stone);
     }
 
     #[test]
-    fn erosion_is_deterministic() {
+    fn expansion_is_deterministic() {
         let g = flat_soil_grid();
-        let a = expand(&g, 12, BiomeCoord::new(2, 3), 42);
-        let b = expand(&g, 12, BiomeCoord::new(2, 3), 42);
+        let opts = BeautifyOptions { microheight: true };
+        let a = expand(&g, 12, BiomeCoord::new(2, 3), 42, opts);
+        let b = expand(&g, 12, BiomeCoord::new(2, 3), 42, opts);
         for z in 0..VOX {
             for y in 0..VOX {
                 for x in 0..VOX {

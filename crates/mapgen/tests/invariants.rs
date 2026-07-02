@@ -88,8 +88,11 @@ fn check_biome_invariants(map: &voxel_mapgen::WorldMap, coord: BiomeCoord) {
                 } else {
                     let pond_ok =
                         c == CellType::Water && matches!(bt, BiomeType::Grass | BiomeType::Sand);
+                    // Beach pass: grass-biome interiors may flip soil → sand
+                    // near large ponds.
+                    let beach_ok = c == CellType::Sand && bt == BiomeType::Grass;
                     assert!(
-                        c == bt.surface_cell() || pond_ok,
+                        c == bt.surface_cell() || pond_ok || beach_ok,
                         "{label} ({x},{y},5) unexpected surface cell {c:?}"
                     );
                 }
@@ -216,6 +219,39 @@ fn check_resource_rarity(map: &voxel_mapgen::WorldMap) {
     );
 }
 
+/// Beach cells hug water: every sand surface cell in a grass biome sits
+/// within two 4-connected steps of surface water, never on the edge ring
+/// (the edge-ring assertion in `check_biome_invariants` covers the latter).
+fn check_beach_belt(map: &voxel_mapgen::WorldMap) {
+    for row in 0..6u8 {
+        for col in 0..6u8 {
+            let coord = BiomeCoord::new(row, col);
+            if map.biome_type(coord) != BiomeType::Grass {
+                continue;
+            }
+            let grid = map.biome(coord);
+            for y in 0..MAX {
+                for x in 0..MAX {
+                    if grid.get(x, y, SURFACE_Z) != CellType::Sand {
+                        continue;
+                    }
+                    let near_water = (-2i32..=2).any(|dy| {
+                        (-2i32..=2).any(|dx| {
+                            (dx.abs() + dy.abs()) <= 2
+                                && grid.get_or_air(x as i32 + dx, y as i32 + dy, SURFACE_Z as i32)
+                                    == CellType::Water
+                        })
+                    });
+                    assert!(
+                        near_water,
+                        "beach cell ({row},{col})/({x},{y}) has no water within 2 steps"
+                    );
+                }
+            }
+        }
+    }
+}
+
 // ── Deterministic tests ───────────────────────────────────────────────────────
 
 #[test]
@@ -243,6 +279,11 @@ fn resource_rarity_seed42() {
     check_resource_rarity(&generate(42));
 }
 
+#[test]
+fn beach_belt_seed42() {
+    check_beach_belt(&generate(42));
+}
+
 // ── Property tests (proptest) ─────────────────────────────────────────────────
 
 use proptest::prelude::*;
@@ -266,6 +307,11 @@ proptest! {
     #[test]
     fn prop_edge_continuity(seed: u64) {
         check_edge_continuity(&generate(seed));
+    }
+
+    #[test]
+    fn prop_beach_belt(seed: u64) {
+        check_beach_belt(&generate(seed));
     }
 
     #[test]

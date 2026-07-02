@@ -6,8 +6,15 @@ WebAssembly + wgpu (web). Future: iOS. Development is LLM-assisted (Claude CLI) 
 This document describes the **implemented** Phase 1 terrain renderer (see `crates/render`, `crates/mapgen`) plus the
 agreed design direction for later phases. Sections marked _future scope_ are not implemented yet.
 
-**Change log — v0.3.** Added the "Terrain Beautification Rules" section (future scope): CLIFF FRACTURES, SLOPES,
-GRASS OVERHANG, GRASS TUFTS, MICROHEIGHT (render tier); BEACHES (mapgen tier); CLOUDS (scene tier). Includes tier
+**Change log — v0.4.** Terrain Beautification Rules are now **implemented**: CLIFF FRACTURES, SLOPES, GRASS OVERHANG,
+GRASS TUFTS, MICROHEIGHT (render tier, `render/src/beautify.rs`); BEACHES (mapgen tier, `mapgen/src/beach_pass.rs`);
+CLOUDS (scene tier, `app/src/clouds.rs`). Implementation notes: the render rules run as ordered volume passes with a
+RETOP (grass/snow regrow) step folded in after the subtractive rules; MICROHEIGHT ships behind `--microheight` (default
+off); tuft coverage was tuned from 15% to ~8% after A/B against the reference art; clouds disable via `--no-clouds` for
+byte-stable screenshots.
+
+**Change log — v0.3.** Added the "Terrain Beautification Rules" section (future scope): CLIFF FRACTURES, SLOPES, GRASS
+OVERHANG, GRASS TUFTS, MICROHEIGHT (render tier); BEACHES (mapgen tier); CLOUDS (scene tier). Includes tier
 classification, expansion pipeline diagram, rule ordering, and the determinism seed formula.
 
 ---
@@ -67,7 +74,7 @@ auto-resolves.
 A cell **is** its resource where one exists — there is no separate element field.
 
 | Cell Type | Band                  | Resource | Notes                                          |
-|-----------|-----------------------|----------|------------------------------------------------|
+| --------- | --------------------- | -------- | ---------------------------------------------- |
 | soil      | Any                   | —        | Dirt; grows a grass top voxel layer if exposed |
 | sand      | Surface, relief       | —        | Beach yellow                                   |
 | water     | Surface               | water    | Translucent, sunken surface                    |
@@ -82,7 +89,7 @@ stone cells at cell layer ≥ 11 (`voxel-core::SNOW_Z`).
 ### Biome anatomy (Z axis in cells, layer 1 = bottom, `z` = layer − 1)
 
 | Layers | Band        | Contents                                                                                                   |
-|--------|-------------|------------------------------------------------------------------------------------------------------------|
+| ------ | ----------- | ---------------------------------------------------------------------------------------------------------- |
 | 1–5    | Underground | Floating-island funnel of soil salted with resource deposits. Tapers toward the bottom tip.                |
 | 6      | Surface     | Always solid, typed by the biome. Interior ponds in grass/sand biomes. Edge strips are flat and typed.     |
 | 7–12   | Above       | Relief: rolling hills + sparse mountain peaks, otherwise air. Cosmetic + line-of-sight flavor; no gameplay |
@@ -103,8 +110,8 @@ stone cells at cell layer ≥ 11 (`voxel-core::SNOW_Z`).
 
 `mapgen` operates exclusively on cells and is engine-free (compiles to wasm, runs headless in CI).
 
-`generate(seed) -> WorldMap` runs two passes (see "Terrain Beautification Rules" below for a proposed third pass —
-BEACHES):
+`generate(seed) -> WorldMap` runs three passes (the third — BEACHES — is specified under "Terrain Beautification Rules"
+below):
 
 1. **Macro pass** (`macro_pass.rs`) — weighted-random `BiomeType` per biome (grass 40 / sand 25 / water 20 / rock 15)
    using `ChaCha8Rng::seed_from_u64(seed)`, then a `Connection` for every internal border (compatible = same type on
@@ -115,16 +122,19 @@ BEACHES):
 - **Underground (z 0–4):** the island funnel. Walked top-down per column: the layer under the surface is always full
   (the surface always has support), deeper layers keep a shrinking, noise-perturbed footprint, and the first cut
   truncates everything below it — so underground mass always hangs from the layer above. Cells inside the funnel are
-  soil salted with deposits: **stone ≥ 30%** (denser toward the bottom, so the underside reads as rubble), **iron
-  ~10%** (z ≤ 3), **gold ~5%** (z ≤ 2). Rarities are enforced by a loose-bounds invariant test and measurable via
+  soil salted with deposits: **stone ≥ 30%** (denser toward the bottom, so the underside reads as rubble), **iron ~10%**
+  (z ≤ 3), **gold ~5%** (z ≤ 2). Rarities are enforced by a loose-bounds invariant test and measurable via
   `cargo run -p voxel-mapgen --example stats`.
-- **Surface (z 5):** the biome's surface cell everywhere; grass/sand biomes get interior **ponds** carved where a
-  pond noise field exceeds a threshold (never on the edge ring).
-- **Relief (z 6–11):** column heights = rolling-hills field **plus** a sparse mountain-peak field (higher frequency
-  than the hills — with only 6 relief layers, peaks must stay a few cells wide or they clip into flat-topped mesas).
-  Heights fade to zero over the three cells nearest a biome edge. Water biomes and pond cells stay flat. Tall columns
-  (≥ 4) are bare stone (mountains); low relief keeps the biome's surface material; rock biomes are stone throughout.
-  No floating cells by construction.
+- **Surface (z 5):** the biome's surface cell everywhere; grass/sand biomes get interior **ponds** carved where a pond
+  noise field exceeds a threshold (never on the edge ring).
+- **Relief (z 6–11):** column heights = rolling-hills field **plus** a sparse mountain-peak field (higher frequency than
+  the hills — with only 6 relief layers, peaks must stay a few cells wide or they clip into flat-topped mesas). Heights
+  fade to zero over the three cells nearest a biome edge. Water biomes and pond cells stay flat. Tall columns (≥ 4) are
+  bare stone (mountains); low relief keeps the biome's surface material; rock biomes are stone throughout. No floating
+  cells by construction.
+
+3. **Beach pass** (`beach_pass.rs`) — flips soil surface cells near large ponds to sand (see "BEACHES" below for the
+   full rule).
 
 ### Determinism contract
 
@@ -148,7 +158,7 @@ The expansion is a pure function of the cell grid, the inspector's layer cutoff,
 exactly like natural terrain).
 
 | Cell Type | Rule                     | Voxel column (bottom → top)           |
-|-----------|--------------------------|---------------------------------------|
+| --------- | ------------------------ | ------------------------------------- |
 | soil      | Top Z == air             | dirt, dirt, dirt, **grass**           |
 | soil      | Top Z != air             | dirt ×4                               |
 | sand      | Top Z == air             | sand ×3, **air** (sunken)             |
@@ -171,19 +181,20 @@ data or its invariant tests.
 
 ---
 
-## Terrain Beautification Rules (_future scope_)
+## Terrain Beautification Rules (implemented)
 
 These rules build on top of the base expansion to make edges, surfaces, and transitions read as natural rather than
-gridded. They are the state-of-the-art voxel-diorama tricks visible in `sample1` and `sample3`: grass draping down
-dirt cliffs, sand belts between grass and water, uneven cliff faces, and drifting clouds.
+gridded. They are the state-of-the-art voxel-diorama tricks visible in `sample1` and `sample3`: grass draping down dirt
+cliffs, sand belts between grass and water, uneven cliff faces, and drifting clouds. Implemented in
+`render/src/beautify.rs` (render tier), `mapgen/src/beach_pass.rs` (mapgen tier), and `app/src/clouds.rs` (scene tier).
 
 ### Tier classification
 
-Each rule lives at exactly one tier. This matters because the LLM implementing them needs to know which crate to
-touch, and mixing tiers breaks headless testing.
+Each rule lives at exactly one tier. This matters because the LLM implementing them needs to know which crate to touch,
+and mixing tiers breaks headless testing.
 
 | Rule            | Tier               | Owning crate | Signature site                                       | Touches sim/mapgen data?  |
-|-----------------|--------------------|--------------|------------------------------------------------------|---------------------------|
+| --------------- | ------------------ | ------------ | ---------------------------------------------------- | ------------------------- |
 | CLIFF FRACTURES | render — expansion | `render`     | expansion returns fewer voxels on exposed side faces | no                        |
 | SLOPES          | render — expansion | `render`     | expansion returns fewer voxels toward lower neighbor | no                        |
 | GRASS OVERHANG  | render — expansion | `render`     | expansion writes grass voxels on side faces          | no                        |
@@ -193,47 +204,42 @@ touch, and mixing tiers breaks headless testing.
 | CLOUDS          | app — scene system | `app`        | Bevy `Update` system on instanced quads              | no                        |
 
 **Why BEACHES lives in mapgen, not render.** Sand near water is a change of cell _type_ (soil → sand), and cell type
-drives mining, connection matching, and army traversal. If the render tier faked sand visually while sim thought it
-was soil, a beach tile would be walkable to a naval unit and mineable as dirt — instant desync. Everything else on
-this list is cosmetic and stays in render or app.
+drives mining, connection matching, and army traversal. If the render tier faked sand visually while sim thought it was
+soil, a beach tile would be walkable to a naval unit and mineable as dirt — instant desync. Everything else on this list
+is cosmetic and stays in render or app.
 
-**Why CLOUDS live in `app`, not render.** Clouds are animated (drift, fade in/out), stateful across frames, and
-occupy world space rather than cells. That's a Bevy scene system, not a pure expansion function. Render's
-determinism guarantee — same seed → identical mesh — does not apply to per-frame animation.
+**Why CLOUDS live in `app`, not render.** Clouds are animated (drift, fade in/out), stateful across frames, and occupy
+world space rather than cells. That's a Bevy scene system, not a pure expansion function. Render's determinism guarantee
+— same seed → identical mesh — does not apply to per-frame animation.
 
 ### Expansion pipeline (render tier)
 
-The current expansion is a single function `cell_column(cell, top_air, cz) -> [VoxelKind; 4]`. The beautification
-rules require **neighbor context** (SLOPES needs to know lateral heights, GRASS OVERHANG needs to know the lateral
-neighbor is air), so the signature grows to:
+The base expansion stays a single pure function `cell_column(cell, top_air, cz) -> [VoxelKind; 4]` (it still drives the
+inspector's expansion-preview panel). The beautification rules require **neighbor context** (SLOPES needs lateral
+heights, GRASS OVERHANG needs to know the lateral column is lower), so they are implemented as ordered **volume passes**
+over the freshly expanded `VoxelVolume`, each with read access to the cell grid via `BeautifyCtx` (peel-aware cell
+lookups + the biome's world-voxel offset and seed for the determinism hash). This gets the same neighbor context the
+earlier `expand_cell(cell, neighbors, …)` sketch called for without changing the per-cell contract: every rule still
+writes only into cells' own 4³ boxes (tufts add at most one voxel directly above a cell top).
 
-```rust
-expand_cell(
-cell,            // this cell
-neighbors,       // 6 face neighbors: [-x, +x, -y, +y, -z, +z]
-cell_coord,      // (bx, by, cx, cy, cz) — biome + local cell coords
-seed,            // world seed
-) -> CellVoxels     // up to 4³ voxels, with optional side-face extras
-```
-
-`neighbors` are pulled by the mesher from the padded cell grid it already builds for face culling — no new data
-structure. `cell_coord` and `seed` feed the determinism hash for every "random" choice inside.
-
-The rules apply in a fixed order, so different rules never quietly cancel each other out. Rule order:
+The rules apply in a fixed order, so different rules never quietly cancel each other out. One step was added over the
+v0.3 sketch: **RETOP**, which regrows grass tops and snow caps on whatever the subtractive rules left as the new top
+(the same rule natural and peeled terrain follow) — without it, every carved edge would read as bare dirt. Rule order:
 
 ```mermaid
 flowchart TD
-    Base["Base pattern (current cell_column)"] --> Slope["SLOPES: remove side voxels toward lower neighbor"]
+    Base["Base pattern (cell_column)"] --> Slope["SLOPES: remove side voxels toward lower neighbor"]
     Slope --> Cliff["CLIFF FRACTURES: remove side voxel columns on exposed faces"]
-    Cliff --> Micro["MICROHEIGHT: drop top-layer voxels per (vx, vy) hash"]
-    Micro --> Overhang["GRASS OVERHANG: paint grass on the top row of side faces"]
+    Cliff --> Micro["MICROHEIGHT (--microheight): drop top-layer voxels per (vx, vy) hash"]
+    Micro --> Retop["RETOP: regrow grass tops / snow caps on carved columns"]
+    Retop --> Overhang["GRASS OVERHANG: paint grass on the top row of side faces"]
     Overhang --> Tufts["GRASS TUFTS: add ≤1 voxel above top grass layer"]
-    Tufts --> Mesher["Mesher: face culling + AO + jitter"]
-    Erode[["Underside erosion (existing, unchanged)"]] --> Mesher
+    Tufts --> Erode["Underside erosion (existing, unchanged)"]
+    Erode --> Mesher["Mesher: face culling + AO + jitter"]
 ```
 
-Base pattern first (what the cell _is_), then subtract (SLOPES, CLIFFS, MICROHEIGHT — nothing is added yet, so
-overhang and tufts see the already-eroded top), then add (OVERHANG, TUFTS).
+Base pattern first (what the cell _is_), then subtract (SLOPES, CLIFFS, MICROHEIGHT — nothing is added yet, so overhang
+and tufts see the already-carved top), then repaint (RETOP), then add (OVERHANG, TUFTS).
 
 ### Determinism seed formula
 
@@ -243,10 +249,12 @@ Every "random" choice inside beautification uses the same hash, with a rule disc
 voxel_hash01(seed, bx, by, cx, cy, cz, vx, vy, vz, RULE_ID) -> f32 in [0, 1)
 ```
 
-`RULE_ID` is a small integer constant per rule (e.g. `RULE_CLIFF = 1`, `RULE_SLOPE = 2`, …). Without the
-discriminator, two rules would draw correlated numbers at the same voxel and produce artifacts. The existing
-`voxel_hash01` in `render/src/erosion.rs` already gives a stable, cross-platform result — extend it with the extra
-argument.
+`RULE_ID` is a small integer constant per rule (`RULE_CLIFF = 1`, `RULE_SLOPE = 2`, `RULE_MICRO = 3`, `RULE_TUFT = 5`,
+`RULE_BEACH = 6`). Without the discriminator, two rules would draw correlated numbers at the same voxel and produce
+artifacts. Implemented as `rule_hash01` (`render/src/beautify.rs`), which folds the rule id into the seed of the
+existing stable, cross-platform `voxel_hash01`; mapgen's beach pass carries its own copy of the same mixer
+(`cell_hash01`) so it stays engine-free. GRASS OVERHANG and RETOP are fully determined by geometry and draw no random
+numbers.
 
 **No `rand::thread_rng()`, no `HashMap` iteration, no `f64` on transcendentals.** Same rules as the rest of render.
 
@@ -259,8 +267,8 @@ instead of stacked cubes. Most visible on stone and soil cells at the biome edge
 
 _Rule:_ for each of the 4 side faces of a cell, if that face is exposed (neighbor is air or the cell above the neighbor
 is air along the face), remove the top 1/2/3 voxels of one or two of the four voxel columns on that face. Number and
-which columns chosen from the hash. Cap: never remove more than half of any face's top voxels, and never remove
-column that would leave a floating voxel on top.
+which columns chosen from the hash. Cap: never remove more than half of any face's top voxels, and never remove column
+that would leave a floating voxel on top.
 
 _Applies to:_ soil, stone, gold, iron. Skip on sand (looks wrong on a beach) and water.
 
@@ -285,8 +293,8 @@ without leaving voxel-space. If, after seeing both rules land, the terrain still
 
 #### GRASS OVERHANG (render, renamed from OVERLAPS)
 
-_Purpose:_ the grass top of a soil cell drapes 1 voxel down the exposed side, so cliffs show a thin green rim on top
-of the brown dirt — visible on every side of the island in `sample1`.
+_Purpose:_ the grass top of a soil cell drapes 1 voxel down the exposed side, so cliffs show a thin green rim on top of
+the brown dirt — visible on every side of the island in `sample1`.
 
 _Rule:_ for a soil cell with `top_air == true` (grass top) and a lateral neighbor that is `air` or has a lower top,
 paint the top row of voxels on that side face with `grass` instead of `dirt`. This is a **face-paint** — it writes into
@@ -305,9 +313,10 @@ mesher relies on. The face-paint version above gets the same look without that b
 _Purpose:_ scattered small grass points on top of grass surfaces, breaking the flat top plane. Subtle — you notice their
 absence more than their presence.
 
-_Rule:_ for each `(vx, vy)` voxel column on top of a grass-topped soil cell, if the hash is above a threshold (e.g.
-0.85 → 15% coverage), add a single `grass` voxel one level above the top row. Never more than 1 voxel tall (higher and
-they read as bushes, not tufts — and bushes are decoration props, not voxels).
+_Rule:_ for each `(vx, vy)` voxel column on top of a grass-topped soil cell, if the hash is above a threshold, add a
+single `grass` voxel one level above the top row. Never more than 1 voxel tall (higher and they read as bushes, not
+tufts — and bushes are decoration props, not voxels). _Tuning note:_ the spec's 15% coverage read as noise on top of the
+color jitter; shipped at threshold 0.92 → ~8% coverage after A/B against the reference art.
 
 _Applies to:_ soil with grass top only.
 
@@ -318,42 +327,43 @@ _Ordering step:_ 6 (last — nothing else operates on the +1 layer above the cel
 _Purpose:_ irregular top surface on wide flat fields. Optional — the existing per-voxel jitter (color) already carries
 most of the flat-field variation, and MICROHEIGHT may be redundant. Ship it on a flag and A/B against the reference art.
 
-_Rule:_ for each `(vx, vy)` column on the top row of an exposed soil, sand, or stone cell, roll the hash; if below a
-low threshold (e.g. 0.1 → 10% of voxels), drop that top voxel.
+_Rule:_ for each `(vx, vy)` column on the top row of an exposed soil, sand, or stone cell, roll the hash; if below a low
+threshold (e.g. 0.1 → 10% of voxels), drop that top voxel.
 
 _Applies to:_ soil, sand, stone.
 
 _Ordering step:_ 4.
 
-_Honest caveat:_ I'm not sure this rule earns its keep on top of the color jitter already in the renderer. Suggest
-implementing behind `--microheight` and comparing snapshots before committing.
+_Honest caveat:_ I'm not sure this rule earns its keep on top of the color jitter already in the renderer. Shipped
+behind `--microheight` (native `inspect`/`screenshot` and `cargo xtask screenshot`), **default off**.
 
 ### BEACHES (mapgen — new post-pass)
 
 _Purpose:_ a sand belt between water and grass, per `sample1`. Currently the water/grass border is a hard color seam.
 
 _Rule:_ after the interior pass, walk every surface cell (z = 5). If the cell is soil and any face-neighbor at z = 5 is
-water, roll a hash — with probability decreasing sharply with the number of steps away from water — and flip it to
-sand. Two-cell wide belt looks natural; wider looks deserty.
+water, roll a hash — with probability decreasing sharply with the number of steps away from water — and flip it to sand.
+Two-cell wide belt looks natural; wider looks deserty.
 
 _Constraints:_
 
 - Never flip an edge-ring cell (would break the border-strip-purity invariant).
 - Never flip a pond-adjacent cell inside a grass biome unless the pond is large (small ponds don't get beaches; they
-  look wrong).
-- Beach cells still contribute to connections as sand, not soil — which changes the connection graph. Add an
-  invariant test: no BEACHES rule can introduce a border-strip mismatch.
+  look wrong). Implemented as: only 4-connected ponds of ≥ 6 surface cells grow a beach.
+- Never flip a cell carrying relief (z=6 non-air): the sand would be hidden under a grass hill and read as a bug where
+  the hill meets the ground.
+- Beach cells still contribute to connections as sand, not soil — which changes the connection graph. The invariant
+  suite verifies no BEACHES flip can introduce a border-strip mismatch.
 
-_Determinism:_ same hash formula (`bx, by, cx, cy, cz=5, vx=0, vy=0, vz=0, RULE_BEACH`).
+_Determinism:_ same hash formula, on world cell coordinates (`RULE_BEACH = 6`, `wz = 5`). Flip probability by BFS
+distance from large-pond water: 92% at 1 step, 35% at 2 steps, 0 beyond.
 
-_New invariant tests:_
+_Invariant tests (implemented in `crates/mapgen/tests/invariants.rs`):_
 
-- Beach cells never touch the edge ring.
+- Beach cells never touch the edge ring (edge-ring purity assert) and always sit within 2 steps of surface water
+  (`beach_belt` checks, deterministic + proptest).
 - Border strips still match cell-for-cell after the pass.
-- Post-pass rerun on the same seed produces identical output.
-
-_Snapshot impact:_ the existing insta ASCII snapshots will change on all seeds — regenerate with `INSTA_UPDATE=always`
-and eyeball diffs before committing.
+- Post-pass rerun on the same seed produces identical output (existing determinism tests cover the full pipeline).
 
 ### CLOUDS (app — scene system)
 
@@ -371,7 +381,10 @@ _Constraints:_
 - Independent of sim tick. This lives on Bevy's variable-rate `Update`, unlike sim's fixed tick.
 
 _Non-determinism:_ intentional. Clouds are the one thing in the renderer that _shouldn't_ match seed-for-seed across
-runs. Snapshot tests need to run with clouds disabled (a `--no-clouds` flag on `cargo xtask screenshot`).
+runs. Snapshot tests run with clouds disabled: `--no-clouds` exists on `cargo xtask screenshot` and on the native
+`inspect`/`screenshot` commands. Implementation notes: each cloud is a parent entity with 9–15 child cubes sharing one
+translucent material (so a whole cloud fades as a unit), cube sizes and offsets snap to the 0.25 voxel grid, and every
+cube is a `NotShadowCaster` so drifting clouds never mottle the terrain lighting.
 
 _Cost note:_ 5–10 clouds at ~20 instanced cubes each is nothing on modern GPUs. If it becomes a WASM concern, drop to
 billboard sprites — but the voxel-cube look is the whole point.
@@ -379,7 +392,7 @@ billboard sprites — but the voxel-cube look is the whole point.
 ### What I'm not adding, and why
 
 | Idea from state-of-the-art voxel work | Verdict for this project    | Why                                                                                                |
-|---------------------------------------|-----------------------------|----------------------------------------------------------------------------------------------------|
+| ------------------------------------- | --------------------------- | -------------------------------------------------------------------------------------------------- |
 | Marching cubes / SDF terrain          | Skip                        | Kills the cubic voxel identity that is the whole aesthetic.                                        |
 | Greedy meshing                        | Later, if the profiler asks | At 48³ per biome with only one focused biome meshed in full, current mesher is not the bottleneck. |
 | Voxel raytracing (Teardown-style)     | Skip                        | Doesn't fit the WASM+wgpu target this decade.                                                      |
@@ -404,7 +417,7 @@ billboard sprites — but the voxel-cube look is the whole point.
 ### Material palette (sRGB, authored against the reference art)
 
 | VoxelKind | sRGB               | Jitter |
-|-----------|--------------------|--------|
+| --------- | ------------------ | ------ |
 | grass     | (0.36, 0.70, 0.22) | 0.13   |
 | dirt      | (0.56, 0.36, 0.22) | 0.10   |
 | sand      | (0.89, 0.80, 0.55) | 0.06   |

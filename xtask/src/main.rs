@@ -41,6 +41,12 @@ enum Command {
             help = "Biome col to focus (0-5); defaults to the most scenic biome"
         )]
         col: Option<u8>,
+        /// Disable the (non-deterministic) drifting clouds for byte-stable output.
+        #[arg(long)]
+        no_clouds: bool,
+        /// Enable the optional MICROHEIGHT beautification rule (A/B flag).
+        #[arg(long)]
+        microheight: bool,
     },
 }
 
@@ -80,6 +86,8 @@ fn main() -> Result<()> {
             out,
             row,
             col,
+            no_clouds,
+            microheight,
         } => {
             let mut args = vec![
                 "run".to_string(),
@@ -98,6 +106,12 @@ fn main() -> Result<()> {
             }
             if let Some(c) = col {
                 args.extend(["--col".into(), c.to_string()]);
+            }
+            if no_clouds {
+                args.push("--no-clouds".into());
+            }
+            if microheight {
+                args.push("--microheight".into());
             }
             let status = std::process::Command::new("cargo").args(&args).status()?;
             anyhow::ensure!(status.success(), "screenshot command failed");

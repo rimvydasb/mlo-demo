@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use voxel_core::BiomeCoord;
 
 #[derive(Parser)]
@@ -8,11 +8,33 @@ struct Cli {
     command: Command,
 }
 
+#[derive(Args, Clone, Copy)]
+struct Presentation {
+    /// Disable the drifting clouds (they are intentionally non-deterministic;
+    /// use this for byte-stable screenshots).
+    #[arg(long)]
+    no_clouds: bool,
+    /// Enable the optional MICROHEIGHT beautification rule (A/B flag).
+    #[arg(long)]
+    microheight: bool,
+}
+
+impl From<Presentation> for voxel_app::AppOptions {
+    fn from(p: Presentation) -> Self {
+        Self {
+            clouds: !p.no_clouds,
+            microheight: p.microheight,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     Inspect {
         #[arg(long, default_value = "42")]
         seed: u64,
+        #[command(flatten)]
+        presentation: Presentation,
     },
     Screenshot {
         #[arg(long, default_value = "42")]
@@ -29,18 +51,23 @@ enum Command {
             help = "Biome col to focus (0-5); defaults to the most scenic biome"
         )]
         col: Option<u8>,
+        #[command(flatten)]
+        presentation: Presentation,
     },
 }
 
 fn main() {
     let cli = Cli::parse();
     match cli.command {
-        Command::Inspect { seed } => voxel_app::run_inspector(seed),
+        Command::Inspect { seed, presentation } => {
+            voxel_app::run_inspector(seed, presentation.into())
+        }
         Command::Screenshot {
             seed,
             out,
             row,
             col,
+            presentation,
         } => {
             let biome = match (row, col) {
                 (Some(r), Some(c)) if r < 6 && c < 6 => Some(BiomeCoord::new(r, c)),
@@ -50,7 +77,7 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            voxel_app::run_screenshot(seed, out, biome)
+            voxel_app::run_screenshot(seed, out, biome, presentation.into())
         }
     }
 }

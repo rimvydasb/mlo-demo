@@ -6,3 +6,6 @@ edition = "2021"
 [dependencies]
 voxel-core = { workspace = true }
 bevy       = { workspace = true }
+
+[dev-dependencies]
+voxel-mapgen = { workspace = true }

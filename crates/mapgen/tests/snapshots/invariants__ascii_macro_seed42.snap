@@ -3,17 +3,17 @@ source: crates/mapgen/tests/invariants.rs
 expression: "voxel_mapgen::ascii_macro(&map)"
 ---
 6×6 macro map
-legend:  . grass  s sand  ~ water  # rock
+legend:  . grass  s sand  ~ water  * winter
          = compatible H edge  | compatible V edge
 
-[.] [~] [.] [#] [~] [s]
+[.] [~] [.] [*] [~] [s]
  |                     
 [.] [s] [~] [s] [.]=[.]
          |   |         
-[~]=[~]=[~] [s]=[s] [#]
+[~]=[~]=[~] [s]=[s] [*]
          |   |       | 
-[s] [#] [~] [s] [#]=[#]
+[s] [*] [~] [s] [*]=[*]
  |           |       | 
-[s] [.]=[.] [s] [.] [#]
+[s] [.]=[.] [s] [.] [*]
          |       |     
 [.] [s] [.]=[.]=[.]=[.]

@@ -4,15 +4,20 @@
 //! before the underside erosion, in the fixed order from rendering.md:
 //!
 //! 1. SLOPES — chamfer the top edge of a cell toward a lower lateral
-//!    neighbor, so stacked-cell hills stop reading as staircases.
+//!    neighbor, so stacked-cell hills stop reading as staircases. **Interior
+//!    only**: cells on the biome's outer edge ring are never sloped — the
+//!    island rim stays a crisp cliff, so every biome keeps a memorable
+//!    silhouette (cliffs allowed, slopes not).
 //! 2. CLIFF FRACTURES — knock the top voxels off one or two columns of an
 //!    exposed side face, so cliffs read as fractured rock instead of cubes.
 //! 3. MICROHEIGHT — (optional, `BeautifyOptions::microheight`) drop sparse
 //!    top voxels on wide flat fields.
 //! 4. RETOP — regrow grass tops / snow caps on whatever the subtractive
-//!    passes left as the new top, exactly like peeled terrain does.
-//! 5. GRASS OVERHANG — the grass top of a soil cell drapes one voxel down
-//!    every exposed side, the thin green rim from the reference art.
+//!    passes left as the new top, exactly like peeled terrain does. In
+//!    winter biomes the regrown top is snow.
+//! 5. GRASS OVERHANG — the top of a soil cell drapes one voxel down every
+//!    exposed side, the thin green rim from the reference art (a snow rim in
+//!    winter biomes).
 //!
 //! FLAT TOPS contract: nothing ever writes above a cell's own top plane —
 //! interior grass fields stay flat so fauna & flora props can stand on them.
@@ -26,9 +31,9 @@
 //! Every random choice is `rule_hash01` on world voxel coordinates with a
 //! per-rule discriminator — same seed, same terrain, on every platform.
 
-use voxel_core::{CellGrid, CellType, CELLS, SNOW_Z};
+use voxel_core::{CellGrid, CellType, CELLS_XY, CELLS_Z, SNOW_Z};
 
-use crate::expansion::{voxel_hash01, VoxelKind, VoxelVolume, SUB, VOX};
+use crate::expansion::{voxel_hash01, VoxelKind, VoxelVolume, SUB, VOX_XY, VOX_Z};
 
 /// Toggles for the optional beautification rules. Lives here (render) but is
 /// registered as a Bevy resource by `RenderPlugin` so the CLI can override it.
@@ -62,16 +67,26 @@ pub(crate) struct BeautifyCtx<'a> {
     ox: i64,
     oy: i64,
     seed: u64,
+    /// Winter biome: RETOP and OVERHANG paint snow instead of grass.
+    winter: bool,
 }
 
 impl<'a> BeautifyCtx<'a> {
-    pub(crate) fn new(grid: &'a CellGrid, cutoff: u8, ox: i64, oy: i64, seed: u64) -> Self {
+    pub(crate) fn new(
+        grid: &'a CellGrid,
+        cutoff: u8,
+        ox: i64,
+        oy: i64,
+        seed: u64,
+        winter: bool,
+    ) -> Self {
         Self {
             grid,
             cutoff,
             ox,
             oy,
             seed,
+            winter,
         }
     }
 
@@ -115,10 +130,10 @@ pub(crate) fn apply(vol: &mut VoxelVolume, ctx: &BeautifyCtx, opts: BeautifyOpti
 
 /// Topmost non-air voxel z in the full-height column, or None.
 fn column_top(vol: &VoxelVolume, vx: i32, vy: i32) -> Option<usize> {
-    if vx < 0 || vy < 0 || vx >= VOX as i32 || vy >= VOX as i32 {
+    if vx < 0 || vy < 0 || vx >= VOX_XY as i32 || vy >= VOX_XY as i32 {
         return None;
     }
-    (0..VOX)
+    (0..VOX_Z)
         .rev()
         .find(|&z| vol.get(vx as usize, vy as usize, z) != VoxelKind::Air)
 }
@@ -156,16 +171,27 @@ fn shave_top(vol: &mut VoxelVolume, vx: usize, vy: usize, cz: u8) {
     }
 }
 
+/// On the biome's outer edge ring (the one-cell border of the footprint)?
+fn on_edge_ring(x: u8, y: u8) -> bool {
+    let edge = CELLS_XY as u8 - 1;
+    x == 0 || y == 0 || x == edge || y == edge
+}
+
 // ── SLOPES ────────────────────────────────────────────────────────────────────
 
 /// Chamfer the top edge of a top-exposed cell toward each lower lateral
 /// neighbor: 1 voxel for small steps, a 2-voxel two-line chamfer for big
 /// ones. Applies to soil, sand, stone; water surfaces stay flat by contract.
+/// Never fires on the biome's outer edge ring — the island rim keeps its
+/// crisp cliff silhouette (cliff fractures still apply there).
 fn slopes(vol: &mut VoxelVolume, ctx: &BeautifyCtx) {
     for_top_cells(
         ctx,
         &[CellType::Soil, CellType::Sand, CellType::Stone],
         |x, y, z| {
+            if on_edge_ring(x, y) {
+                return;
+            }
             for d in DIRS {
                 let outer = face_line(x, y, d, 0);
                 // Face-level decision, hashed at the face's first voxel.
@@ -216,9 +242,9 @@ fn cliff_fractures(vol: &mut VoxelVolume, ctx: &BeautifyCtx) {
         CellType::Gold,
         CellType::Iron,
     ];
-    for z in 0..(CELLS as u8).min(ctx.cutoff) {
-        for y in 0..CELLS as u8 {
-            for x in 0..CELLS as u8 {
+    for z in 0..(CELLS_Z as u8).min(ctx.cutoff) {
+        for y in 0..CELLS_XY as u8 {
+            for x in 0..CELLS_XY as u8 {
                 let cell = ctx.cell(x as i32, y as i32, z as i32);
                 if !kinds.contains(&cell) {
                     continue;
@@ -272,11 +298,13 @@ fn microheight(vol: &mut VoxelVolume, ctx: &BeautifyCtx) {
 // ── RETOP ─────────────────────────────────────────────────────────────────────
 
 /// Regrow the cosmetic top on whatever the subtractive passes exposed:
-/// carved soil regrows grass, carved high-band stone regrows its snow cap —
-/// the same rule natural and peeled terrain follow.
+/// carved soil regrows grass (snow in winter), carved high-band stone
+/// regrows its snow cap (any stone does in winter) — the same rule natural
+/// and peeled terrain follow.
 fn retop(vol: &mut VoxelVolume, ctx: &BeautifyCtx) {
     for_top_cells(ctx, &[CellType::Soil, CellType::Stone], |x, y, z| {
-        let snow = ctx.cell(x as i32, y as i32, z as i32) == CellType::Stone && z >= SNOW_Z;
+        let stone = ctx.cell(x as i32, y as i32, z as i32) == CellType::Stone;
+        let snow_on_stone = stone && (ctx.winter || z >= SNOW_Z);
         for dy in 0..SUB {
             for dx in 0..SUB {
                 let (vx, vy) = (x as usize * SUB + dx, y as usize * SUB + dy);
@@ -284,8 +312,9 @@ fn retop(vol: &mut VoxelVolume, ctx: &BeautifyCtx) {
                     continue;
                 };
                 match vol.get(vx, vy, t) {
+                    VoxelKind::Dirt if ctx.winter => vol.set(vx, vy, t, VoxelKind::Snow),
                     VoxelKind::Dirt => vol.set(vx, vy, t, VoxelKind::Grass),
-                    VoxelKind::Stone if snow => vol.set(vx, vy, t, VoxelKind::Snow),
+                    VoxelKind::Stone if snow_on_stone => vol.set(vx, vy, t, VoxelKind::Snow),
                     _ => {}
                 }
             }
@@ -297,9 +326,14 @@ fn retop(vol: &mut VoxelVolume, ctx: &BeautifyCtx) {
 
 /// The grass top of a soil cell drapes one voxel down every side face whose
 /// lateral voxel column is lower — the thin green rim over brown dirt seen
-/// on every cliff of the reference art. A face-paint: writes only into this
-/// cell's own voxel slots.
+/// on every cliff of the reference art (a white snow rim in winter biomes).
+/// A face-paint: writes only into this cell's own voxel slots.
 fn grass_overhang(vol: &mut VoxelVolume, ctx: &BeautifyCtx) {
+    let rim = if ctx.winter {
+        VoxelKind::Snow
+    } else {
+        VoxelKind::Grass
+    };
     for_top_cells(ctx, &[CellType::Soil], |x, y, z| {
         for d in DIRS {
             for (vx, vy) in face_line(x, y, d, 0) {
@@ -314,7 +348,7 @@ fn grass_overhang(vol: &mut VoxelVolume, ctx: &BeautifyCtx) {
                     && t > z as usize * SUB
                     && vol.get(vx, vy, t - 1) == VoxelKind::Dirt
                 {
-                    vol.set(vx, vy, t - 1, VoxelKind::Grass);
+                    vol.set(vx, vy, t - 1, rim);
                 }
             }
         }
@@ -325,9 +359,9 @@ fn grass_overhang(vol: &mut VoxelVolume, ctx: &BeautifyCtx) {
 
 /// Visit every top-exposed cell (air above, peel-aware) of the given types.
 fn for_top_cells(ctx: &BeautifyCtx, kinds: &[CellType], mut f: impl FnMut(u8, u8, u8)) {
-    for z in 0..(CELLS as u8).min(ctx.cutoff) {
-        for y in 0..CELLS as u8 {
-            for x in 0..CELLS as u8 {
+    for z in 0..(CELLS_Z as u8).min(ctx.cutoff) {
+        for y in 0..CELLS_XY as u8 {
+            for x in 0..CELLS_XY as u8 {
                 let cell = ctx.cell(x as i32, y as i32, z as i32);
                 if kinds.contains(&cell) && ctx.top_air(x, y, z) {
                     f(x, y, z);
@@ -341,14 +375,15 @@ fn for_top_cells(ctx: &BeautifyCtx, kinds: &[CellType], mut f: impl FnMut(u8, u8
 mod tests {
     use super::*;
     use crate::expansion::expand;
-    use voxel_core::{BiomeCoord, SURFACE_Z};
+    use voxel_core::{BiomeCoord, BiomeType, SURFACE_Z};
 
     const OPTS: BeautifyOptions = BeautifyOptions { microheight: false };
+    const FULL: u8 = CELLS_Z as u8;
 
     fn flat_soil_grid() -> CellGrid {
         let mut g = CellGrid::new();
-        for y in 0..CELLS as u8 {
-            for x in 0..CELLS as u8 {
+        for y in 0..CELLS_XY as u8 {
+            for x in 0..CELLS_XY as u8 {
                 for z in 0..=SURFACE_Z {
                     g.set(x, y, z, CellType::Soil);
                 }
@@ -358,21 +393,23 @@ mod tests {
     }
 
     fn top_of(vol: &VoxelVolume, x: usize, y: usize) -> Option<usize> {
-        (0..VOX).rev().find(|&z| vol.get(x, y, z) != VoxelKind::Air)
+        (0..VOX_Z)
+            .rev()
+            .find(|&z| vol.get(x, y, z) != VoxelKind::Air)
     }
 
     #[test]
     fn slopes_chamfer_relief_steps() {
-        // One relief cell on a flat field: every perimeter voxel column of
-        // its exposed top must lose at least one voxel to the chamfer, and
-        // retop must regrow grass on whatever is left.
+        // One relief cell on a flat field (off the edge ring): every
+        // perimeter voxel column of its exposed top must lose at least one
+        // voxel to the chamfer, and retop must regrow grass on what is left.
         let mut g = flat_soil_grid();
-        g.set(6, 6, SURFACE_Z + 1, CellType::Soil);
-        let vol = expand(&g, 12, BiomeCoord::new(0, 0), 42, OPTS);
+        g.set(4, 4, SURFACE_Z + 1, CellType::Soil);
+        let vol = expand(&g, BiomeType::Grass, FULL, BiomeCoord::new(0, 0), 42, OPTS);
 
         let base_top = (SURFACE_Z as usize + 1) * SUB + SUB - 1;
         for d in DIRS {
-            for (vx, vy) in face_line(6, 6, d, 0) {
+            for (vx, vy) in face_line(4, 4, d, 0) {
                 let t = top_of(&vol, vx, vy).unwrap();
                 assert!(t < base_top, "({vx},{vy}) rim column not chamfered");
                 assert_eq!(
@@ -385,19 +422,81 @@ mod tests {
     }
 
     #[test]
+    fn no_slopes_on_the_biome_edge_ring() {
+        // The island rim must stay a crisp cliff: the surface edge ring keeps
+        // its full-height top plane wherever cliff fractures did not fire —
+        // and the *slope* pass specifically must never lower a full face
+        // line the way it does in the interior. Verify no edge-ring cell
+        // lost its entire top voxel line (a slope signature; fractures cap
+        // at 2 of 4 columns per face).
+        let vol = expand(
+            &flat_soil_grid(),
+            BiomeType::Grass,
+            FULL,
+            BiomeCoord::new(0, 0),
+            42,
+            OPTS,
+        );
+        let surface_top = SURFACE_Z as usize * SUB + SUB - 1;
+        let edge = CELLS_XY as u8 - 1;
+        for cy in 0..CELLS_XY as u8 {
+            for cx in [0u8, edge] {
+                for d in DIRS {
+                    let kept = face_line(cx, cy, d, 0)
+                        .iter()
+                        .filter(|&&(vx, vy)| vol.get(vx, vy, surface_top) != VoxelKind::Air)
+                        .count();
+                    assert!(
+                        kept >= 2,
+                        "edge cell ({cx},{cy}) face {d:?} lost {} of 4 top voxels — sloped?",
+                        4 - kept
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn grass_overhang_drapes_the_island_rim() {
         // On the biome rim the lateral neighbor is world air, so grass must
         // drape a voxel down the face on a healthy share of columns.
-        let vol = expand(&flat_soil_grid(), 12, BiomeCoord::new(0, 0), 42, OPTS);
+        let vol = expand(
+            &flat_soil_grid(),
+            BiomeType::Grass,
+            FULL,
+            BiomeCoord::new(0, 0),
+            42,
+            OPTS,
+        );
         let mut draped = 0;
-        for vy in 0..VOX {
+        for vy in 0..VOX_XY {
             let t = top_of(&vol, 0, vy).unwrap();
             assert_eq!(vol.get(0, vy, t), VoxelKind::Grass);
             if t > SURFACE_Z as usize * SUB && vol.get(0, vy, t - 1) == VoxelKind::Grass {
                 draped += 1;
             }
         }
-        assert!(draped > VOX / 2, "only {draped}/{VOX} rim columns draped");
+        assert!(
+            draped > VOX_XY / 2,
+            "only {draped}/{VOX_XY} rim columns draped"
+        );
+    }
+
+    #[test]
+    fn winter_overhang_and_retop_paint_snow() {
+        let vol = expand(
+            &flat_soil_grid(),
+            BiomeType::Winter,
+            FULL,
+            BiomeCoord::new(0, 0),
+            42,
+            OPTS,
+        );
+        // Every rim top is snow, never grass.
+        for vy in 0..VOX_XY {
+            let t = top_of(&vol, 0, vy).unwrap();
+            assert_eq!(vol.get(0, vy, t), VoxelKind::Snow);
+        }
     }
 
     #[test]
@@ -405,10 +504,17 @@ mod tests {
         // FLAT TOPS contract: fauna & flora props stand on grass, so nothing
         // may poke above a flat field's top plane (the old GRASS TUFTS rule
         // left single-voxel pimples here).
-        let vol = expand(&flat_soil_grid(), 12, BiomeCoord::new(0, 0), 42, OPTS);
+        let vol = expand(
+            &flat_soil_grid(),
+            BiomeType::Grass,
+            FULL,
+            BiomeCoord::new(0, 0),
+            42,
+            OPTS,
+        );
         let above = SURFACE_Z as usize * SUB + SUB; // one above the grass top
-        for vy in 0..VOX {
-            for vx in 0..VOX {
+        for vy in 0..VOX_XY {
+            for vx in 0..VOX_XY {
                 assert_eq!(
                     vol.get(vx, vy, above),
                     VoxelKind::Air,
@@ -421,39 +527,42 @@ mod tests {
     #[test]
     fn microheight_only_fires_when_enabled() {
         let g = flat_soil_grid();
-        let base = expand(&g, 12, BiomeCoord::new(0, 0), 42, OPTS);
+        let base = expand(&g, BiomeType::Grass, FULL, BiomeCoord::new(0, 0), 42, OPTS);
         let micro = expand(
             &g,
-            12,
+            BiomeType::Grass,
+            FULL,
             BiomeCoord::new(0, 0),
             42,
             BeautifyOptions { microheight: true },
         );
-        let differs = (0..VOX)
-            .any(|z| (0..VOX).any(|y| (0..VOX).any(|x| base.get(x, y, z) != micro.get(x, y, z))));
+        let differs = (0..VOX_Z).any(|z| {
+            (0..VOX_XY).any(|y| (0..VOX_XY).any(|x| base.get(x, y, z) != micro.get(x, y, z)))
+        });
         assert!(differs, "--microheight had no effect");
     }
 
     #[test]
     fn no_floating_voxels_above_the_erosion_band() {
-        // Slopes/cliffs/microheight only shave tops and tufts sit on grass,
-        // so above the underside-erosion band every solid voxel must rest on
-        // another. Checked over a real generated world for coverage.
+        // Slopes/cliffs/microheight only shave tops, so above the
+        // underside-erosion band every solid voxel must rest on another.
+        // Checked over a real generated world for coverage.
         let map = voxel_mapgen::generate(42);
         for row in 0..2u8 {
             for col in 0..2u8 {
                 let coord = BiomeCoord::new(row, col);
                 let vol = expand(
                     map.biome(coord),
-                    12,
+                    map.biome_type(coord),
+                    FULL,
                     coord,
                     42,
                     BeautifyOptions { microheight: true },
                 );
                 let erosion_top = SURFACE_Z as usize * SUB;
-                for z in erosion_top + 1..VOX {
-                    for y in 0..VOX {
-                        for x in 0..VOX {
+                for z in erosion_top + 1..VOX_Z {
+                    for y in 0..VOX_XY {
+                        for x in 0..VOX_XY {
                             if vol.get(x, y, z) != VoxelKind::Air {
                                 assert_ne!(
                                     vol.get(x, y, z - 1),

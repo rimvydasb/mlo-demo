@@ -10,13 +10,18 @@ mod mesh;
 pub use beautify::{rule_hash01, BeautifyOptions};
 pub use camera::{CameraState, EguiWantsPointer, InspectorCamera};
 pub use decor::{plan_decor, DecorInstance, DecorKind, DecorModel};
-pub use expansion::{cell_column, expand, voxel_hash01, VoxelKind, VoxelVolume, SUB, VOX};
-pub use mesh::{base_color_linear, base_color_srgb, build_biome_meshes, BiomeMeshes, VOXEL_SIZE};
+pub use expansion::{
+    cell_column, expand, voxel_hash01, VoxelKind, VoxelVolume, SUB, VOX_XY, VOX_Z,
+};
+pub use mesh::{
+    base_color_linear, base_color_srgb, build_biome_meshes, build_cell_shell_mesh, BiomeMeshes,
+    VOXEL_SIZE,
+};
 
 use bevy::light::CascadeShadowConfigBuilder;
 use bevy::pbr::{DistanceFog, FogFalloff};
 use bevy::prelude::*;
-use voxel_core::{BiomeCoord, BiomeType, CELLS, SURFACE_Z};
+use voxel_core::{BiomeCoord, CELLS_XY, CELLS_Z};
 
 /// Soft sky backdrop; fog fades into the same color so distant proxies
 /// dissolve into the sky.
@@ -27,7 +32,7 @@ pub const SKY_COLOR: Color = Color::srgb(0.64, 0.75, 0.86);
 #[derive(Resource, Clone, Copy, PartialEq, Eq)]
 pub struct FocusedBiome(pub BiomeCoord);
 
-/// Show cell layers with z < cutoff (1..=12). 12 = everything.
+/// Show cell layers with z < cutoff (1..=CELLS_Z). CELLS_Z = everything.
 #[derive(Resource, Clone, Copy, PartialEq, Eq)]
 pub struct LayerCutoff(pub u8);
 
@@ -47,7 +52,7 @@ pub struct RenderPlugin;
 impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(FocusedBiome(BiomeCoord::new(0, 0)))
-            .insert_resource(LayerCutoff(CELLS as u8))
+            .insert_resource(LayerCutoff(CELLS_Z as u8))
             .init_resource::<BeautifyOptions>()
             .insert_resource(EguiWantsPointer::default())
             .insert_resource(SceneEntities::default())
@@ -72,7 +77,7 @@ fn spawn_lights(mut commands: Commands) {
         },
         // Low-ish lateral sun so relief casts readable shadows across the
         // surface instead of hiding them under the geometry.
-        Transform::from_xyz(30.0, 22.0, 2.0).looking_at(Vec3::new(6.0, 6.0, 6.0), Vec3::Y),
+        Transform::from_xyz(30.0, 22.0, 2.0).looking_at(Vec3::new(4.0, 6.0, 4.0), Vec3::Y),
         // One tight cascade: crisp shadows on the focused biome, and the
         // island's shadow never lands on far-away proxy tiles.
         CascadeShadowConfigBuilder {
@@ -93,7 +98,7 @@ fn spawn_lights(mut commands: Commands) {
             shadow_maps_enabled: false,
             ..default()
         },
-        Transform::from_xyz(-6.0, 16.0, 24.0).looking_at(Vec3::new(6.0, 5.0, 6.0), Vec3::Y),
+        Transform::from_xyz(-6.0, 16.0, 24.0).looking_at(Vec3::new(4.0, 5.0, 4.0), Vec3::Y),
     ));
 
     // AmbientLight is a component (not a Resource) in Bevy 0.19.
@@ -106,14 +111,16 @@ fn spawn_lights(mut commands: Commands) {
 
 /// Fog component for the inspector camera (attached in spawn_camera).
 pub fn camera_fog() -> DistanceFog {
-    // The camera orbits at a fixed 60-unit distance; the focused biome spans
-    // roughly ±12 units of view depth around that. Fog starts just past it
-    // so only the proxy ring fades toward the sky.
+    // The perspective camera orbits ~22 units out; the greyed-out neighbour
+    // biomes sit 9 units apart, so fog starts past the first ring and only
+    // dissolves the far corners of the world into the sky. Kept gentle on
+    // purpose: the fog-of-war shells must stay readable — memorizing biome
+    // silhouettes is the point.
     DistanceFog {
         color: SKY_COLOR,
         falloff: FogFalloff::Linear {
-            start: 74.0,
-            end: 150.0,
+            start: 45.0,
+            end: 140.0,
         },
         ..default()
     }
@@ -144,33 +151,28 @@ pub fn water_material() -> StandardMaterial {
     }
 }
 
-// ── Proxy tiles (the 35 unfocused biomes) ────────────────────────────────────
+// ── Fog-of-war shells (the 35 unfocused biomes) ──────────────────────────────
 
-/// Dimmed, lit slab standing in for an unfocused biome. Lit (not unlit) so
-/// distance fog applies and the archipelago sits in the same atmosphere.
-pub fn proxy_material(bt: BiomeType) -> StandardMaterial {
-    let (r, g, b) = match bt {
-        BiomeType::Grass => (0.22, 0.38, 0.18),
-        BiomeType::Sand => (0.52, 0.46, 0.30),
-        BiomeType::Water => (0.15, 0.30, 0.48),
-        BiomeType::Rock => (0.33, 0.33, 0.36),
-    };
+/// Uniform grey for the fog-of-war cell shells of unfocused biomes. One
+/// material for every biome type on purpose: unfocused biomes are known by
+/// silhouette only. Lit (not unlit) so faces shade and distance fog applies.
+pub fn proxy_material() -> StandardMaterial {
     StandardMaterial {
-        base_color: Color::srgb(r, g, b),
+        base_color: Color::srgb(0.42, 0.44, 0.47),
         perceptual_roughness: 1.0,
-        reflectance: 0.05,
+        reflectance: 0.04,
         ..default()
     }
 }
 
-/// Proxy slab center position. Proxies float at the focused biome's surface
-/// altitude so the world reads as an archipelago of floating islands.
+/// World translation of a biome's cell (0,0,0) corner relative to the
+/// focused biome (which sits at the origin). Biomes are separated by exactly
+/// one cell of air: spacing = footprint + 1.
 pub fn proxy_world_offset(coord: BiomeCoord, focused: BiomeCoord) -> Vec3 {
-    let spacing = 15.0_f32;
-    let surface_y = SURFACE_Z as f32 + 0.75;
+    let spacing = (CELLS_XY + 1) as f32;
     Vec3::new(
-        (coord.col as f32 - focused.col as f32) * spacing + CELLS as f32 / 2.0,
-        surface_y,
-        (coord.row as f32 - focused.row as f32) * spacing + CELLS as f32 / 2.0,
+        (coord.col as f32 - focused.col as f32) * spacing,
+        0.0,
+        (coord.row as f32 - focused.row as f32) * spacing,
     )
 }

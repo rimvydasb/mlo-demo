@@ -3,8 +3,8 @@
 //! `generate(seed)` runs three passes:
 //! 1. **Macro pass** — assigns a `BiomeType` to each of the 36 biomes and
 //!    computes edge `Connection`s (compatible = same type on both sides).
-//! 2. **Interior pass** — fills each biome's 12³ `CellGrid` from world-space
-//!    noise so fields continue seamlessly across borders.
+//! 2. **Interior pass** — fills each biome's 8×8×12 `CellGrid` from
+//!    world-space noise so fields continue seamlessly across borders.
 //! 3. **Beach pass** — flips soil to sand around large surface ponds (a sand
 //!    belt is a cell-type change, so it must happen here, not in render).
 //!

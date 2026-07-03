@@ -1,14 +1,14 @@
-//! Interior pass: fills one biome's 12³ cell grid.
+//! Interior pass: fills one biome's 8×8×12 cell grid.
 //!
-//! All noise is sampled in world cell coordinates (`col * 12 + x`) so fields
+//! All noise is sampled in world cell coordinates (`col * 8 + x`) so fields
 //! are continuous across biome borders, and every noise source is derived
 //! from the world seed — biome generation order can never affect results.
 
 use noise::{NoiseFn, Perlin};
-use voxel_core::{BiomeCoord, BiomeType, CellGrid, CellType, Seed, CELLS, SURFACE_Z};
+use voxel_core::{BiomeCoord, BiomeType, CellGrid, CellType, Seed, CELLS_XY, SURFACE_Z};
 
-const MAX: u8 = CELLS as u8; // 12
-const EDGE: u8 = MAX - 1; // 11
+const MAX: u8 = CELLS_XY as u8; // 8
+const EDGE: u8 = MAX - 1; // 7
 
 fn derive_u32(seed: Seed, offset: u64) -> u32 {
     let mixed = seed
@@ -18,25 +18,27 @@ fn derive_u32(seed: Seed, offset: u64) -> u32 {
 }
 
 struct Noises {
-    funnel: Perlin,
     stone: Perlin,
     iron: Perlin,
     gold: Perlin,
     pond: Perlin,
     height: Perlin,
     mountain: Perlin,
+    island: Perlin,
 }
 
 impl Noises {
     fn new(seed: Seed) -> Self {
         Self {
-            funnel: Perlin::new(derive_u32(seed, 1)),
+            // Offset 1 was the retired funnel-jitter noise; it stays reserved
+            // so the other fields keep their historical derivations.
             stone: Perlin::new(derive_u32(seed, 2)),
             iron: Perlin::new(derive_u32(seed, 3)),
             gold: Perlin::new(derive_u32(seed, 4)),
             pond: Perlin::new(derive_u32(seed, 5)),
             height: Perlin::new(derive_u32(seed, 6)),
             mountain: Perlin::new(derive_u32(seed, 7)),
+            island: Perlin::new(derive_u32(seed, 8)),
         }
     }
 }
@@ -45,8 +47,8 @@ pub fn generate_biome(seed: Seed, coord: BiomeCoord, biome_type: BiomeType) -> C
     let n = Noises::new(seed);
     let mut grid = CellGrid::new();
 
-    let ox = coord.col as f64 * CELLS as f64;
-    let oy = coord.row as f64 * CELLS as f64;
+    let ox = coord.col as f64 * CELLS_XY as f64;
+    let oy = coord.row as f64 * CELLS_XY as f64;
 
     for y in 0..MAX {
         for x in 0..MAX {
@@ -64,34 +66,28 @@ pub fn generate_biome(seed: Seed, coord: BiomeCoord, biome_type: BiomeType) -> C
 
 // ── Underground (z = 0..=4, cell layers 1–5) ────────────────────────────────
 //
-// The biome is a floating island: the underground mass tapers toward the
-// bottom (a "funnel"), so deeper layers cover a shrinking noise-perturbed
-// footprint. Cells inside the funnel are soil salted with resource deposits.
+// The biome is a floating island: below the full 8×8 surface, each layer is a
+// fixed centered rectangle, stepping down 6×6 → 5×4 → 4×3 → 3×2 → 2×1 toward
+// the bottom tip. The rectangles nest, so underground mass always hangs from
+// the layer above by construction. Cells inside the funnel are soil salted
+// with resource deposits.
+
+/// Funnel footprint (width, depth) per underground z, deepest first.
+const FUNNEL: [(u8, u8); SURFACE_Z as usize] = [(2, 1), (3, 2), (4, 3), (5, 4), (6, 6)];
+
+/// Does the funnel rectangle at underground layer `z` contain (x, y)?
+fn in_funnel(x: u8, y: u8, z: u8) -> bool {
+    let (w, h) = FUNNEL[z as usize];
+    let x0 = (MAX - w) / 2;
+    let y0 = (MAX - h) / 2;
+    (x0..x0 + w).contains(&x) && (y0..y0 + h).contains(&y)
+}
 
 fn fill_underground(grid: &mut CellGrid, n: &Noises, x: u8, y: u8, wx: f64, wy: f64) {
-    // Distance from biome center, 0 at center → 1 at the rim. Blends square
-    // and round metrics so the taper steps like the reference art but does
-    // not read as a perfect pyramid.
-    let (dx, dy) = (x as f64 - 5.5, y as f64 - 5.5);
-    let cheb = dx.abs().max(dy.abs()) / 5.5;
-    let eucl = (dx * dx + dy * dy).sqrt() / 7.78; // 7.78 ≈ corner distance
-    let dist = 0.6 * cheb + 0.4 * eucl;
-
-    // Walk top-down and stop at the first cut, so underground mass always
-    // hangs from the layer above (and ultimately from the full surface).
-    for z in (0..SURFACE_Z).rev() {
-        // Radius of the solid footprint at this depth. The layer directly
-        // under the surface is always full so the surface has support;
-        // deeper layers keep a shrinking core.
-        if z < SURFACE_Z - 1 {
-            let radius = 0.45 + 0.16 * z as f64;
-            let jitter = n.funnel.get([wx * 0.35, wy * 0.35, z as f64 * 0.9]) * 0.10;
-            if dist > radius + jitter {
-                break; // this cell and everything below stays Air
-            }
+    for z in 0..SURFACE_Z {
+        if in_funnel(x, y, z) {
+            grid.set(x, y, z, pick_deposit(n, wx, wy, z));
         }
-
-        grid.set(x, y, z, pick_deposit(n, wx, wy, z));
     }
 }
 
@@ -116,17 +112,24 @@ fn pick_deposit(n: &Noises, wx: f64, wy: f64, z: u8) -> CellType {
 
 // ── Surface (z = 5, cell layer 6) ────────────────────────────────────────────
 //
-// Always solid, typed by the biome. Grass and sand biomes get interior ponds
-// carved by noise; the one-cell edge ring always stays the biome's own type
-// so compatible borders match cell-for-cell.
+// Always solid, typed by the biome — the widest part of the island (8×8).
+// Grass, winter, and sand biomes get interior ponds carved by noise; water
+// biomes get occasional sand islands. The one-cell edge ring always stays the
+// biome's own type so compatible borders match cell-for-cell.
 
 fn fill_surface(grid: &mut CellGrid, n: &Noises, bt: BiomeType, x: u8, y: u8, wx: f64, wy: f64) {
     let mut cell = bt.surface_cell();
 
     let interior = x > 0 && x < EDGE && y > 0 && y < EDGE;
-    let ponds_allowed = matches!(bt, BiomeType::Grass | BiomeType::Sand);
+    let ponds_allowed = matches!(bt, BiomeType::Grass | BiomeType::Sand | BiomeType::Winter);
     if interior && ponds_allowed && n.pond.get([wx * 0.16, wy * 0.16]) > 0.48 {
         cell = CellType::Water;
+    }
+    // Water biomes: sparse sand islets where the island noise spikes. High
+    // threshold + higher frequency than ponds → small clusters, and many
+    // water biomes stay open sea.
+    if interior && bt == BiomeType::Water && n.island.get([wx * 0.24, wy * 0.24]) > 0.52 {
+        cell = CellType::Sand;
     }
 
     grid.set(x, y, SURFACE_Z, cell);
@@ -135,17 +138,19 @@ fn fill_surface(grid: &mut CellGrid, n: &Noises, bt: BiomeType, x: u8, y: u8, wx
 // ── Relief (z = 6..=11, cell layers 7–12) ────────────────────────────────────
 //
 // Column heights come from a rolling-hills field plus a sparse mountain mask.
-// Heights fade to zero over the three cells nearest a biome edge so border
-// strips stay flat and walkable. Water biomes and pond cells stay flat.
+// Heights fade to zero over the two cells nearest a biome edge so border
+// strips stay flat and walkable. Water biomes (islands included) and pond
+// columns stay flat.
 
 fn fill_relief(grid: &mut CellGrid, n: &Noises, bt: BiomeType, x: u8, y: u8, wx: f64, wy: f64) {
     if bt == BiomeType::Water || grid.get(x, y, SURFACE_Z) == CellType::Water {
         return;
     }
 
-    // 0 on the edge ring → 1 three cells in.
+    // 0 on the edge ring → 1 two cells in (the 8×8 footprint leaves a 4×4
+    // full-height core; the old 3-cell fade would squeeze it to 2×2).
     let edge_dist = x.min(y).min(EDGE - x).min(EDGE - y);
-    let fade = (edge_dist.min(3) as f64) / 3.0;
+    let fade = (edge_dist.min(2) as f64) / 2.0;
     if fade == 0.0 {
         return;
     }
@@ -158,11 +163,10 @@ fn fill_relief(grid: &mut CellGrid, n: &Noises, bt: BiomeType, x: u8, y: u8, wx:
     // Peaks are added on top of the rolling hills so mountains rise out of
     // the terrain in cones instead of clipping into flat-topped towers.
     let (hill_height, peak_height) = match bt {
-        BiomeType::Grass => (
+        BiomeType::Grass | BiomeType::Winter => (
             hills01.powf(1.4) * 3.0,
             mountain_peak(mountain01, 0.62, 6.5),
         ),
-        BiomeType::Rock => (hills01 * 3.5, mountain_peak(mountain01, 0.55, 6.5)),
         BiomeType::Sand => (hills01.powf(2.0) * 2.2, 0.0),
         BiomeType::Water => unreachable!(),
     };
@@ -173,8 +177,8 @@ fn fill_relief(grid: &mut CellGrid, n: &Noises, bt: BiomeType, x: u8, y: u8, wx:
     }
 
     // Tall columns are bare mountain rock; low relief keeps the biome's
-    // surface material. Rock biomes are stone throughout.
-    let material = if bt == BiomeType::Rock || height >= 4 {
+    // surface material.
+    let material = if height >= 4 {
         CellType::Stone
     } else {
         bt.surface_cell()
@@ -192,4 +196,36 @@ fn mountain_peak(mask01: f64, threshold: f64, amplitude: f64) -> f64 {
     }
     let t = (mask01 - threshold) / (1.0 - threshold);
     t.powf(1.3) * amplitude
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn funnel_rectangles_nest() {
+        // Every funnel layer must sit inside the layer above (the surface is
+        // the full 8×8), so underground mass always hangs from above.
+        for z in 0..SURFACE_Z {
+            for y in 0..MAX {
+                for x in 0..MAX {
+                    if in_funnel(x, y, z) {
+                        let above_ok = z + 1 == SURFACE_Z || in_funnel(x, y, z + 1);
+                        assert!(above_ok, "funnel cell ({x},{y},{z}) has no support above");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn funnel_footprint_sizes() {
+        for (z, &(w, h)) in FUNNEL.iter().enumerate() {
+            let count = (0..MAX)
+                .flat_map(|y| (0..MAX).map(move |x| (x, y)))
+                .filter(|&(x, y)| in_funnel(x, y, z as u8))
+                .count();
+            assert_eq!(count, w as usize * h as usize);
+        }
+    }
 }

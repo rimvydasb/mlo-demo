@@ -13,9 +13,9 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::prelude::*;
 use bevy::render::mesh::{Indices, PrimitiveTopology};
-use voxel_core::BiomeCoord;
+use voxel_core::{BiomeCoord, CellGrid, CellType, CELLS_XY, CELLS_Z};
 
-use crate::expansion::{voxel_hash01, VoxelKind, VoxelVolume, SUB, VOX};
+use crate::expansion::{voxel_hash01, VoxelKind, VoxelVolume, SUB, VOX_XY, VOX_Z};
 
 /// World-space edge length of one voxel (1 cell = 1.0 world unit).
 pub const VOXEL_SIZE: f32 = 1.0 / SUB as f32;
@@ -97,12 +97,12 @@ pub fn build_biome_meshes(vol: &VoxelVolume, coord: BiomeCoord, seed: u64) -> Bi
     let mut opaque = Buffers::default();
     let mut water = Buffers::default();
 
-    let ox = coord.col as i64 * VOX as i64;
-    let oy = coord.row as i64 * VOX as i64;
+    let ox = coord.col as i64 * VOX_XY as i64;
+    let oy = coord.row as i64 * VOX_XY as i64;
 
-    for z in 0..VOX {
-        for y in 0..VOX {
-            for x in 0..VOX {
+    for z in 0..VOX_Z {
+        for y in 0..VOX_XY {
+            for x in 0..VOX_XY {
                 let kind = vol.get(x, y, z);
                 if kind == VoxelKind::Air {
                     continue;
@@ -187,6 +187,54 @@ fn emit_face(
         buf.indices
             .extend_from_slice(&[base + 1, base + 2, base + 3, base + 1, base + 3, base]);
     }
+}
+
+/// Fog-of-war stand-in for an unfocused biome: every non-air **cell** (water
+/// included — biome shape is what matters) becomes one grey unit cube, faces
+/// culled against non-air cell neighbours. No voxel expansion, no
+/// beautification, no colors baked in — pair it with `proxy_material()`. The
+/// result is the biome's exact silhouette at cell resolution, which is what
+/// lets players memorize biomes by shape before focusing them.
+pub fn build_cell_shell_mesh(grid: &CellGrid) -> Option<Mesh> {
+    let mut buf = Buffers::default();
+    let solid = |x: i32, y: i32, z: i32| grid.get_or_air(x, y, z) != CellType::Air;
+
+    for z in 0..CELLS_Z as i32 {
+        for y in 0..CELLS_XY as i32 {
+            for x in 0..CELLS_XY as i32 {
+                if !solid(x, y, z) {
+                    continue;
+                }
+                let p = [x, y, z];
+                for face in &FACES {
+                    let n = face.normal_v;
+                    if solid(x + n[0], y + n[1], z + n[2]) {
+                        continue;
+                    }
+                    let base = buf.positions.len() as u32;
+                    for corner in &face.corners {
+                        // Cell space → world: 1 cell = 1.0 unit, (x, y, z) → (x, z, y).
+                        let cx = (p[0] + corner[0]) as f32;
+                        let cy = (p[1] + corner[1]) as f32;
+                        let cz = (p[2] + corner[2]) as f32;
+                        buf.positions.push([cx, cz, cy]);
+                        buf.normals.push([n[0] as f32, n[2] as f32, n[1] as f32]);
+                        buf.colors.push([1.0, 1.0, 1.0, 1.0]);
+                    }
+                    buf.indices.extend_from_slice(&[
+                        base,
+                        base + 1,
+                        base + 2,
+                        base,
+                        base + 2,
+                        base + 3,
+                    ]);
+                }
+            }
+        }
+    }
+
+    buf.into_mesh()
 }
 
 /// Classic voxel AO: for a face corner, occlusion from the two edge

@@ -16,7 +16,7 @@ The pipeline is split so each concern lives in exactly one place, mirroring the 
 split. Extending one tier (new model, new placement rule, new animation) never touches the other two.
 
 | Tier                | Crate / module        | Responsibility                                                                       | Engine-coupled?                     |
-|---------------------|-----------------------|--------------------------------------------------------------------------------------|-------------------------------------|
+| ------------------- | --------------------- | ------------------------------------------------------------------------------------ | ----------------------------------- |
 | Catalog + placement | `voxel-render::decor` | What kinds exist, which models they use, deterministic planning of what stands where | No ECS, no assets (pure + testable) |
 | Asset management    | `voxel-app::assets`   | Workspace asset root, GLB scene handles, load tracking, palette harmonization        | Bevy `AssetServer`                  |
 | Scene + animation   | `voxel-app::decor`    | Spawning planned instances as entities, despawn on rebuild, idle animations          | Bevy ECS systems                    |
@@ -45,7 +45,7 @@ every platform, and independent of biome generation order. Rule-id blocks (each 
 jitter ×2, scale, phase):
 
 | Rule block  | Id   | Notes                                                      |
-|-------------|------|------------------------------------------------------------|
+| ----------- | ---- | ---------------------------------------------------------- |
 | beautify    | 1–5  | see rendering.md                                           |
 | BEACHES     | 6    | mapgen tier                                                |
 | caves       | 8–46 | underground cave pockets (rendering.md, underside erosion) |
@@ -75,10 +75,17 @@ assets/
     │   ├── animal-*.glb            (11 animals incl. fish)
     │   ├── Textures/colormap.png   (shared texture the GLBs reference by relative path)
     │   └── LICENSE-kenney-cube-pets.txt
-    └── flora/                      ← kenney_nature-kit (CC0)
-        ├── tree_*.glb  flower_*.glb  grass*.glb  plant_bushSmall.glb
-        └── LICENSE-kenney-nature-kit.txt
+    └── flora/                      ← kenney_nature-kit + kenney_platformer-kit (CC0)
+        ├── tree_*.glb  flower_*.glb  grass*.glb  plant_bushSmall.glb   (nature-kit)
+        ├── tree-pine-snow.glb  tree-snow.glb                           (platformer-kit, winter biomes)
+        ├── Textures/colormap.png   (platformer-kit shared texture, referenced by relative path)
+        ├── LICENSE-kenney-nature-kit.txt
+        └── LICENSE-kenney-platformer-kit.txt
 ```
+
+**Gotcha:** the platformer-kit GLBs reference `Textures/colormap.png` by relative URI (like cube-pets). Copying the GLB
+without the texture loads silently as an invisible model — the screenshot runner waits on `all_loaded`, times out, and
+captures without the prop.
 
 - **Asset root**: Bevy's default asset root resolves against the running package's manifest dir, which breaks in a
   workspace (`cargo run -p native` would look in `platforms/native/assets`). `voxel-app::assets::asset_plugin()` bakes
@@ -98,7 +105,7 @@ assets/
   through untouched. GLB materials are shared per asset, so one retint covers all instances.
 
 | Source color (linear) | Kenney name  | Retint target (sRGB) |
-|-----------------------|--------------|----------------------|
+| --------------------- | ------------ | -------------------- |
 | (0.161, 0.788, 0.671) | `leafsGreen` | (0.33, 0.68, 0.22)   |
 | (0.169, 0.651, 0.667) | `leafsDark`  | (0.22, 0.52, 0.19)   |
 | (0.173, 0.847, 0.722) | `grass`      | (0.41, 0.75, 0.26)   |
@@ -108,42 +115,51 @@ assets/
 ## Catalog
 
 Kinds, their model variants, and where they may stand. "Grass top" = an exposed soil cell (which the expansion crowns
-with grass voxels) — placement is cell-tier, so beach sand and pond water made by mapgen are seen correctly.
+with grass voxels — snow in winter biomes) — placement is cell-tier, so beach sand and pond water made by mapgen are
+seen correctly.
 
-| Kind       | Variants                                                | Stands on               | Extra placement constraints                                                           |
-|------------|---------------------------------------------------------|-------------------------|---------------------------------------------------------------------------------------|
-| Tree       | tree_default, tree_oak, tree_pineDefaultA, tree_simple  | soil (grass) tops       | interior only (off the edge ring); local-flat (no higher 8-neighbour)                 |
-| Palm       | tree_palm, tree_palmShort, tree_palmTall, tree_palmBend | sand tops **only**      | interior only; local-flat                                                             |
-| Flower     | flower\_{purple,red,yellow}{A,C}                        | soil (grass) tops       | —                                                                                     |
-| Grass prop | grass, grass_large, plant_bushSmall                     | soil (grass) tops       | — (replaces the removed GRASS TUFTS voxel rule)                                       |
-| Animal     | see habitat table below                                 | any solid non-water top | never on a raised ledge that drops into water (reads as floating from the iso camera) |
-| Fish       | animal-fish                                             | surface water cells     | anchored near the cell floor, fully submerged                                         |
+**FLAT TOP rule (v1.1, applies to everything except fish):** the anchor cell must have **no lateral (4-neighbour) column
+lower than itself**, and the biome rim counts as a drop. Those are exactly the cells whose top voxels the SLOPES and
+CLIFF FRACTURES passes carve — a prop anchored there stands partly on removed voxels and reads as floating in mid-air.
+`flat_top()` in the planner; asserted for every instance in the placement test. Fish are exempt because water surfaces
+are never carved (flat by contract).
+
+| Kind       | Variants                                                                                              | Stands on               | Extra placement constraints                                                                                                                                                             |
+| ---------- | ----------------------------------------------------------------------------------------------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Tree       | temperate: tree_default, tree_oak, tree_pineDefaultA, tree_simple · winter: tree-pine-snow, tree-snow | soil (grass/snow) tops  | flat-top; interior only (off the edge ring); local-flat (no higher 8-neighbour); winter biomes plant only the winter set (`TREE_WINTER` range), temperate biomes only the temperate set |
+| Palm       | tree_palm, tree_palmShort, tree_palmTall, tree_palmBend                                               | sand tops **only**      | flat-top; interior only; local-flat                                                                                                                                                     |
+| Flower     | flower\_{purple,red,yellow}{A,C}                                                                      | soil (grass) tops       | flat-top; **never in winter biomes**                                                                                                                                                    |
+| Grass prop | grass, grass_large, plant_bushSmall                                                                   | soil (grass) tops       | flat-top; **never in winter biomes** (replaces the removed GRASS TUFTS voxel rule)                                                                                                      |
+| Animal     | see habitat table below                                                                               | any solid non-water top | flat-top; never on a raised ledge that drops into water (reads as floating on the pond)                                                                                                 |
+| Fish       | animal-fish                                                                                           | surface water cells     | anchored near the cell floor, fully submerged                                                                                                                                           |
 
 ### Animal habitats
 
-Animals pick their variant from the habitat group of the cell they stand on:
+Animals pick their variant from the habitat group of the cell they stand on (winter biomes override soil):
 
-| Habitat  | Top cell type       | Animals                           |
-|----------|---------------------|-----------------------------------|
-| Meadow   | soil (grass top)    | bunny, fox, deer, pig, chick, cow |
-| Beach    | sand                | crab, parrot                      |
-| Mountain | stone / gold / iron | penguin, polar bear               |
+| Habitat       | Top cell type              | Animals                                                            |
+| ------------- | -------------------------- | ------------------------------------------------------------------ |
+| Meadow        | soil (grass top)           | bunny, fox, deer, pig, chick, cow                                  |
+| Beach         | sand                       | crab, parrot                                                       |
+| Mountain      | stone / gold / iron        | penguin, polar bear                                                |
+| Winter (soil) | soil in a **winter** biome | penguin, polar bear (mountain set, at meadow density + tree bonus) |
 
 ### Densities (probability per eligible top cell)
 
 At most **one decoration per cell**: flora and fish are planned first (first matching rule wins), animals fill remaining
 free cells in a second pass — which is what lets tree positions boost animal density nearby.
 
-| Kind             | Probability            | Notes                                                    |
-|------------------|------------------------|----------------------------------------------------------|
-| Tree             | 0.06                   |                                                          |
-| Palm             | 0.06                   |                                                          |
-| Flower           | 0.10                   | rolled only where no tree landed                         |
-| Grass prop       | 0.12                   | rolled only where no tree/flower landed                  |
-| Fish             | 0.10                   |                                                          |
-| Animal, meadow   | 0.05 (+0.05 near tree) | "near tree" = a planned tree within Chebyshev distance 2 |
-| Animal, beach    | 0.03                   |                                                          |
-| Animal, mountain | 0.02                   |                                                          |
+| Kind             | Probability            | Notes                                                                                                                        |
+| ---------------- | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| Tree, temperate  | 0.06                   |                                                                                                                              |
+| Tree, winter     | 0.10                   | snow pines are the winter biome's main feature                                                                               |
+| Palm             | 0.06                   |                                                                                                                              |
+| Flower           | 0.10                   | rolled only where no tree landed; never in winter                                                                            |
+| Grass prop       | 0.12                   | rolled only where no tree/flower landed; never in winter                                                                     |
+| Fish             | 0.10                   |                                                                                                                              |
+| Animal, meadow   | 0.05 (+0.05 near tree) | "near tree" = a planned tree within Chebyshev distance 2; winter biomes use these odds with the mountain (penguin/polar) set |
+| Animal, beach    | 0.03                   |                                                                                                                              |
+| Animal, mountain | 0.02                   |                                                                                                                              |
 
 ### Anchoring
 
@@ -152,7 +168,7 @@ stay on the flat inner 2×2 voxels that the slope/fracture passes never carve). 
 visual patterns:
 
 | Top cell    | Anchor Y above cell base | Why                                                 |
-|-------------|--------------------------|-----------------------------------------------------|
+| ----------- | ------------------------ | --------------------------------------------------- |
 | soil, stone | 1.0                      | grass/snow/stone top is flush with the cell top     |
 | sand        | 0.75                     | sand tops render one voxel sunken                   |
 | water       | 0.05                     | fish anchor near the floor; water surface is at 0.5 |
@@ -169,7 +185,7 @@ animation, matching the chunky diorama style. Every instance carries a planner-h
 never move in lockstep.
 
 | Motion | Kinds        | Behaviour                                                                                         |
-|--------|--------------|---------------------------------------------------------------------------------------------------|
+| ------ | ------------ | ------------------------------------------------------------------------------------------------- |
 | Still  | all flora    | none (wind sway is a possible future extension — add a `Motion::Sway` arm)                        |
 | Hop    | land animals | small parabolic hop (≤ 0.16 world units) once per 2.2–4 s cycle, plus a lazy look-around yaw sway |
 | Swim   | fish         | one lap of a 0.15-radius circle every 12–20 s, gentle vertical bob, nose along the swim tangent   |
@@ -183,7 +199,7 @@ never move in lockstep.
   tracked in `SceneEntities::decorations`, next to the biome meshes and proxy tiles.
 - Decorations exist on the **focused biome only**. Proxy slabs get none (props would be sub-pixel at that distance);
   decorating proxies with a few billboard trees is a possible future extension.
-- Rough budget: a 12×12 biome yields ~20–40 instances (see densities) — negligible against the 48³ terrain mesh.
+- Rough budget: an 8×8 biome yields ~5–15 instances (see densities) — negligible against the 32×32×48 terrain mesh.
 
 ---
 
@@ -204,6 +220,11 @@ a flat grass field's top plane) and the **no-pinhole** underground rule.
 ---
 
 ## Change log
+
+**v1.1 — flat tops, winter, 8×8 biomes.** `plan_decor` now takes the `BiomeType` and enforces the FLAT TOP rule (no prop
+on a slope/fracture-carved cell — they read as floating). Winter biomes plant snow pines only (kenney_platformer-kit
+`tree-pine-snow` / `tree-snow`, plus the kit's `Textures/colormap.png`), skip flowers and grass props, and roam
+penguins/polar bears on the snow at meadow density. Grid constants moved to `CELLS_XY`/`CELLS_Z`.
 
 **v1.0 — initial implementation.** Kenney cube-pets (11 animals) + nature-kit (17 flora models) curated into `assets/`;
 three-tier planner/assets/scene architecture; deterministic cell-tier placement with habitat groups and tree-proximity

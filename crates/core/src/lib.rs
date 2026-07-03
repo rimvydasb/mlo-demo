@@ -1,15 +1,18 @@
 //! Cell-tier world model shared by every crate.
 //!
-//! The world is a 6×6 grid of biomes; a biome is a 12×12×12 grid of *cells*.
-//! Cells are the logical/gameplay unit. The purely cosmetic cell → 4×4×4
-//! voxel expansion lives in `voxel-render` and never leaks into this crate.
+//! The world is a 6×6 grid of biomes; a biome is an 8×8×12 grid of *cells*
+//! (8×8 footprint, 12 layers tall). Cells are the logical/gameplay unit. The
+//! purely cosmetic cell → 4×4×4 voxel expansion lives in `voxel-render` and
+//! never leaks into this crate.
 
 use serde::{Deserialize, Serialize};
 
 pub type Seed = u64;
 
-/// Cells per biome edge (biome = CELLS³ cells).
-pub const CELLS: usize = 12;
+/// Cells per biome edge in the horizontal plane (biome footprint = CELLS_XY²).
+pub const CELLS_XY: usize = 8;
+/// Cell layers per biome (vertical). Layer indices in docs/UI are 1-based.
+pub const CELLS_Z: usize = 12;
 /// Z index of the surface layer (cell layer 6, 1-based).
 pub const SURFACE_Z: u8 = 5;
 /// First relief Z index eligible for a cosmetic snow cap (cell layer 11).
@@ -72,24 +75,24 @@ impl CellType {
     }
 }
 
-/// 12×12×12 grid of cells. Z is up: z=0 is the deepest underground layer
+/// 8×8×12 grid of cells. Z is up: z=0 is the deepest underground layer
 /// (cell layer 1), z=SURFACE_Z is the surface, z=6..=11 is relief.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CellGrid {
-    cells: Box<[CellType; CELLS * CELLS * CELLS]>,
+    cells: Box<[CellType; CELLS_XY * CELLS_XY * CELLS_Z]>,
 }
 
 impl CellGrid {
     pub fn new() -> Self {
         Self {
-            cells: Box::new([CellType::Air; CELLS * CELLS * CELLS]),
+            cells: Box::new([CellType::Air; CELLS_XY * CELLS_XY * CELLS_Z]),
         }
     }
 
     #[inline]
     fn idx(x: u8, y: u8, z: u8) -> usize {
-        debug_assert!((x as usize) < CELLS && (y as usize) < CELLS && (z as usize) < CELLS);
-        x as usize + CELLS * y as usize + CELLS * CELLS * z as usize
+        debug_assert!((x as usize) < CELLS_XY && (y as usize) < CELLS_XY && (z as usize) < CELLS_Z);
+        x as usize + CELLS_XY * y as usize + CELLS_XY * CELLS_XY * z as usize
     }
 
     #[inline]
@@ -105,8 +108,9 @@ impl CellGrid {
     /// Out-of-bounds reads as Air.
     #[inline]
     pub fn get_or_air(&self, x: i32, y: i32, z: i32) -> CellType {
-        let max = CELLS as i32;
-        if x < 0 || y < 0 || z < 0 || x >= max || y >= max || z >= max {
+        let max_xy = CELLS_XY as i32;
+        let max_z = CELLS_Z as i32;
+        if x < 0 || y < 0 || z < 0 || x >= max_xy || y >= max_xy || z >= max_z {
             CellType::Air
         } else {
             self.get(x as u8, y as u8, z as u8)
@@ -133,7 +137,9 @@ pub enum BiomeType {
     Grass,
     Sand,
     Water,
-    Rock,
+    /// Snowy grassland: soil surface like Grass, but every exposed top wears
+    /// snow and the flora is snow-covered pines. Replaced the old Rock biome.
+    Winter,
 }
 
 impl BiomeType {
@@ -143,7 +149,7 @@ impl BiomeType {
             BiomeType::Grass => CellType::Soil,
             BiomeType::Sand => CellType::Sand,
             BiomeType::Water => CellType::Water,
-            BiomeType::Rock => CellType::Stone,
+            BiomeType::Winter => CellType::Soil,
         }
     }
 
@@ -152,7 +158,7 @@ impl BiomeType {
             BiomeType::Grass => "Grass",
             BiomeType::Sand => "Sand",
             BiomeType::Water => "Water",
-            BiomeType::Rock => "Rock",
+            BiomeType::Winter => "Winter",
         }
     }
 }
@@ -229,7 +235,14 @@ mod tests {
     fn out_of_bounds_is_air() {
         let g = CellGrid::new();
         assert_eq!(g.get_or_air(-1, 0, 0), CellType::Air);
-        assert_eq!(g.get_or_air(0, 12, 0), CellType::Air);
+        assert_eq!(g.get_or_air(0, 8, 0), CellType::Air);
+        assert_eq!(g.get_or_air(0, 0, 12), CellType::Air);
+    }
+
+    #[test]
+    fn footprint_is_narrower_than_height() {
+        assert_eq!(CELLS_XY, 8);
+        assert_eq!(CELLS_Z, 12);
     }
 
     #[test]
@@ -238,6 +251,11 @@ mod tests {
         assert_eq!(CellType::Soil.resource(), None);
         assert!(!CellType::Water.is_solid());
         assert!(CellType::Iron.is_solid());
+    }
+
+    #[test]
+    fn winter_surface_is_soil() {
+        assert_eq!(BiomeType::Winter.surface_cell(), CellType::Soil);
     }
 
     #[test]

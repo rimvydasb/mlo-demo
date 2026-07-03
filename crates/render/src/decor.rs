@@ -2,15 +2,18 @@
 //! grid (see docs/rendering-fauna-flora.md).
 //!
 //! This module is the *planner* only — a pure function of the cell grid, the
-//! layer cutoff, the biome coordinate, and the seed. It decides **what**
-//! stands **where** (kind, variant, transform, animation phase) and nothing
-//! else. Loading the GLB assets and spawning/animating entities is the app
-//! tier's job (`voxel-app::{assets, decor}`); this keeps placement headless
-//! and unit-testable, exactly like the mapgen passes.
+//! biome type, the layer cutoff, the biome coordinate, and the seed. It
+//! decides **what** stands **where** (kind, variant, transform, animation
+//! phase) and nothing else. Loading the GLB assets and spawning/animating
+//! entities is the app tier's job (`voxel-app::{assets, decor}`); this keeps
+//! placement headless and unit-testable, exactly like the mapgen passes.
 //!
 //! Placement is cell-tier: decorations anchor to the top cell of a column,
-//! never to individual voxels. All decorations are cosmetic — the cell grid
-//! (mining, connections, invariants) never changes.
+//! never to individual voxels. Every anchor cell must be **flat-topped**: no
+//! lateral neighbour column may be lower, because the SLOPES and CLIFF
+//! FRACTURES passes carve exactly those cells' top voxels and a prop on a
+//! carved top reads as floating in the air. All decorations are cosmetic —
+//! the cell grid (mining, connections, invariants) never changes.
 //!
 //! Every random choice is `rule_hash01` on world *cell* coordinates with a
 //! per-kind rule id, so plans are deterministic per seed and independent of
@@ -18,7 +21,7 @@
 
 use bevy::math::Vec3;
 use std::f32::consts::TAU;
-use voxel_core::{BiomeCoord, CellGrid, CellType, CELLS};
+use voxel_core::{BiomeCoord, BiomeType, CellGrid, CellType, CELLS_XY, CELLS_Z};
 
 use crate::beautify::rule_hash01;
 use crate::mesh::VOXEL_SIZE;
@@ -39,13 +42,21 @@ const fn model(path: &'static str, scale: f32) -> DecorModel {
     DecorModel { path, scale }
 }
 
-/// Trees stand on soil (grass) tops.
+/// Trees stand on soil (grass) tops. The first block is the temperate set;
+/// the tail is the snow-covered winter set (see `TREE_TEMPERATE` /
+/// `TREE_WINTER` — winter biomes plant only snow trees, like the animal
+/// habitat ranges).
 pub const TREES: &[DecorModel] = &[
     model("models/flora/tree_default.glb", 1.00), // native h 1.71
     model("models/flora/tree_oak.glb", 1.40),     // native h 1.23
     model("models/flora/tree_pineDefaultA.glb", 1.15), // native h 1.55
     model("models/flora/tree_simple.glb", 1.10),  // native h 1.52
+    // Winter (kenney_platformer-kit)
+    model("models/flora/tree-pine-snow.glb", 0.85), // native h 2.00
+    model("models/flora/tree-snow.glb", 0.88),      // native h 1.93
 ];
+pub const TREE_TEMPERATE: std::ops::Range<usize> = 0..4;
+pub const TREE_WINTER: std::ops::Range<usize> = 4..6;
 
 /// Palms stand on sand tops only.
 pub const PALMS: &[DecorModel] = &[
@@ -55,7 +66,8 @@ pub const PALMS: &[DecorModel] = &[
     model("models/flora/tree_palmBend.glb", 1.20), // native h 1.38
 ];
 
-/// Flowers stand on grass (exposed soil) tops.
+/// Flowers stand on grass (exposed soil) tops. Skipped in winter biomes —
+/// flowers poking through snow read as a bug, not a meadow.
 pub const FLOWERS: &[DecorModel] = &[
     model("models/flora/flower_purpleA.glb", 1.3),
     model("models/flora/flower_redA.glb", 1.3),
@@ -66,7 +78,7 @@ pub const FLOWERS: &[DecorModel] = &[
 ];
 
 /// Grass/bush props on grass tops — the prop-tier replacement for the
-/// removed single-voxel GRASS TUFTS rule.
+/// removed single-voxel GRASS TUFTS rule. Skipped in winter biomes.
 pub const GRASS_PROPS: &[DecorModel] = &[
     model("models/flora/grass.glb", 1.1),
     model("models/flora/grass_large.glb", 1.1),
@@ -86,7 +98,7 @@ pub const ANIMALS: &[DecorModel] = &[
     // Beach (sand tops)
     model("models/fauna/animal-crab.glb", 0.21),
     model("models/fauna/animal-parrot.glb", 0.23),
-    // Mountain (stone tops)
+    // Mountain (stone tops) and everywhere in winter biomes
     model("models/fauna/animal-penguin.glb", 0.23),
     model("models/fauna/animal-polar.glb", 0.33),
 ];
@@ -155,6 +167,8 @@ pub struct DecorInstance {
 // ── Densities (probability per eligible top cell) ─────────────────────────────
 
 const TREE_P: f32 = 0.06;
+/// Winter forests read denser: snow pines are the biome's main feature.
+const TREE_WINTER_P: f32 = 0.10;
 const PALM_P: f32 = 0.06;
 const FLOWER_P: f32 = 0.10;
 const GRASS_PROP_P: f32 = 0.12;
@@ -183,17 +197,26 @@ const RULE_FISH: u64 = 104;
 /// Plan all decorations for one biome. Pure and deterministic: same inputs,
 /// same plan, on every platform. Cutoff-aware like the expansion — peeling
 /// layers re-plans decor on the freshly exposed surface, exactly as peeled
-/// soil regrows a grass top.
-pub fn plan_decor(grid: &CellGrid, cutoff: u8, coord: BiomeCoord, seed: u64) -> Vec<DecorInstance> {
+/// soil regrows a grass top. `bt` swaps the flora set in winter biomes
+/// (snow pines only; no flowers or grass props) and the fauna to the
+/// mountain group (penguin, polar bear).
+pub fn plan_decor(
+    grid: &CellGrid,
+    bt: BiomeType,
+    cutoff: u8,
+    coord: BiomeCoord,
+    seed: u64,
+) -> Vec<DecorInstance> {
+    let winter = bt == BiomeType::Winter;
     let mut out = Vec::new();
-    let tops: Vec<Option<(u8, CellType)>> = (0..CELLS * CELLS)
-        .map(|i| column_top(grid, cutoff, (i % CELLS) as u8, (i / CELLS) as u8))
+    let tops: Vec<Option<(u8, CellType)>> = (0..CELLS_XY * CELLS_XY)
+        .map(|i| column_top(grid, cutoff, (i % CELLS_XY) as u8, (i / CELLS_XY) as u8))
         .collect();
     let top = |x: i32, y: i32| -> Option<(u8, CellType)> {
-        if x < 0 || y < 0 || x >= CELLS as i32 || y >= CELLS as i32 {
+        if x < 0 || y < 0 || x >= CELLS_XY as i32 || y >= CELLS_XY as i32 {
             None
         } else {
-            tops[x as usize + CELLS * y as usize]
+            tops[x as usize + CELLS_XY * y as usize]
         }
     };
 
@@ -202,17 +225,17 @@ pub fn plan_decor(grid: &CellGrid, cutoff: u8, coord: BiomeCoord, seed: u64) -> 
         seed,
         out: &mut out,
     };
-    let mut occupied = [false; CELLS * CELLS];
-    let mut tree_at = [false; CELLS * CELLS];
+    let mut occupied = [false; CELLS_XY * CELLS_XY];
+    let mut tree_at = [false; CELLS_XY * CELLS_XY];
 
     // Pass A: flora and fish. At most one decoration per cell by
     // construction (first matching rule wins).
-    for y in 0..CELLS as u8 {
-        for x in 0..CELLS as u8 {
+    for y in 0..CELLS_XY as u8 {
+        for x in 0..CELLS_XY as u8 {
             let Some((z, cell)) = top(x as i32, y as i32) else {
                 continue;
             };
-            let i = x as usize + CELLS * y as usize;
+            let i = x as usize + CELLS_XY * y as usize;
             match cell {
                 CellType::Water => {
                     if ctx.roll(RULE_FISH, x, y, z) < FISH_P {
@@ -221,20 +244,21 @@ pub fn plan_decor(grid: &CellGrid, cutoff: u8, coord: BiomeCoord, seed: u64) -> 
                     }
                 }
                 CellType::Soil => {
+                    if !flat_top(&top, x, y, z) {
+                        continue; // carved by slopes/fractures — props would float
+                    }
                     let canopy_fits = interior(x, y) && local_flat(&top, x, y, z);
-                    if canopy_fits && ctx.roll(RULE_TREE, x, y, z) < TREE_P {
-                        ctx.place(
-                            DecorKind::Tree,
-                            RULE_TREE,
-                            x,
-                            y,
-                            z,
-                            cell,
-                            0..TREES.len(),
-                            0.15,
-                        );
+                    let (tree_range, tree_p) = if winter {
+                        (TREE_WINTER, TREE_WINTER_P)
+                    } else {
+                        (TREE_TEMPERATE, TREE_P)
+                    };
+                    if canopy_fits && ctx.roll(RULE_TREE, x, y, z) < tree_p {
+                        ctx.place(DecorKind::Tree, RULE_TREE, x, y, z, cell, tree_range, 0.15);
                         occupied[i] = true;
                         tree_at[i] = true;
+                    } else if winter {
+                        // No flowers or grass props under the snow.
                     } else if ctx.roll(RULE_FLOWER, x, y, z) < FLOWER_P {
                         ctx.place(
                             DecorKind::Flower,
@@ -263,6 +287,9 @@ pub fn plan_decor(grid: &CellGrid, cutoff: u8, coord: BiomeCoord, seed: u64) -> 
                     }
                 }
                 CellType::Sand => {
+                    if !flat_top(&top, x, y, z) {
+                        continue;
+                    }
                     let canopy_fits = interior(x, y) && local_flat(&top, x, y, z);
                     if canopy_fits && ctx.roll(RULE_PALM, x, y, z) < PALM_P {
                         ctx.place(
@@ -283,19 +310,23 @@ pub fn plan_decor(grid: &CellGrid, cutoff: u8, coord: BiomeCoord, seed: u64) -> 
         }
     }
 
-    // Pass B: animals on any solid, non-water top cell that is still free.
-    for y in 0..CELLS as u8 {
-        for x in 0..CELLS as u8 {
-            let i = x as usize + CELLS * y as usize;
+    // Pass B: animals on any solid, non-water, flat top cell that is still
+    // free.
+    for y in 0..CELLS_XY as u8 {
+        for x in 0..CELLS_XY as u8 {
+            let i = x as usize + CELLS_XY * y as usize;
             if occupied[i] {
                 continue;
             }
             let Some((z, cell)) = top(x as i32, y as i32) else {
                 continue;
             };
+            if !flat_top(&top, x, y, z) {
+                continue;
+            }
             // An animal on a raised ledge that drops straight into water
-            // reads as "floating on the pond" from the isometric camera —
-            // keep animals off pond-edge relief (same-level shores are fine).
+            // reads as "floating on the pond" from the camera — keep animals
+            // off pond-edge relief (same-level shores are fine).
             let over_water = [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)]
                 .iter()
                 .any(|&(dx, dy)| {
@@ -306,6 +337,16 @@ pub fn plan_decor(grid: &CellGrid, cutoff: u8, coord: BiomeCoord, seed: u64) -> 
                 continue;
             }
             let (p, group) = match cell {
+                CellType::Soil if winter => {
+                    // Winter fauna: penguins and polar bears roam the snow.
+                    let near_tree = chebyshev_2(&tree_at, x, y);
+                    let bonus = if near_tree {
+                        ANIMAL_NEAR_TREE_BONUS
+                    } else {
+                        0.0
+                    };
+                    (ANIMAL_MEADOW_P + bonus, ANIMAL_MOUNTAIN)
+                }
                 CellType::Soil => {
                     let near_tree = chebyshev_2(&tree_at, x, y);
                     let bonus = if near_tree {
@@ -333,7 +374,7 @@ pub fn plan_decor(grid: &CellGrid, cutoff: u8, coord: BiomeCoord, seed: u64) -> 
 /// Top-most non-air cell of a column, with the layer peel applied (cells at
 /// z ≥ cutoff read as air, same as the expansion sees them).
 fn column_top(grid: &CellGrid, cutoff: u8, x: u8, y: u8) -> Option<(u8, CellType)> {
-    (0..(CELLS as u8).min(cutoff)).rev().find_map(|z| {
+    (0..(CELLS_Z as u8).min(cutoff)).rev().find_map(|z| {
         let c = grid.get(x, y, z);
         (c != CellType::Air).then_some((z, c))
     })
@@ -342,8 +383,22 @@ fn column_top(grid: &CellGrid, cutoff: u8, x: u8, y: u8) -> Option<(u8, CellType
 /// Off the one-cell edge ring — trees and palms have canopies that would
 /// overhang the island rim (and the neighbouring biome's border strip).
 fn interior(x: u8, y: u8) -> bool {
-    let max = CELLS as u8 - 1;
+    let max = CELLS_XY as u8 - 1;
     x > 0 && y > 0 && x < max && y < max
+}
+
+/// No lateral (4-neighbour) column is lower than this one, and none is
+/// missing (the biome rim always counts as a drop). Exactly these cells keep
+/// an uncarved top plane: SLOPES chamfers toward lower neighbours and CLIFF
+/// FRACTURES fires where a lateral cell is air, so anything placed on a
+/// non-flat top would hover over the carved voxels.
+fn flat_top(top: &impl Fn(i32, i32) -> Option<(u8, CellType)>, x: u8, y: u8, z: u8) -> bool {
+    [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)]
+        .iter()
+        .all(|&(dx, dy)| match top(x as i32 + dx, y as i32 + dy) {
+            Some((nz, _)) => nz >= z,
+            None => false,
+        })
 }
 
 /// No 8-neighbour column rises above this one — keeps canopies out of
@@ -365,15 +420,15 @@ fn local_flat(top: &impl Fn(i32, i32) -> Option<(u8, CellType)>, x: u8, y: u8, z
 }
 
 /// Any planned tree within Chebyshev distance 2 of (x, y)?
-fn chebyshev_2(tree_at: &[bool; CELLS * CELLS], x: u8, y: u8) -> bool {
+fn chebyshev_2(tree_at: &[bool; CELLS_XY * CELLS_XY], x: u8, y: u8) -> bool {
     for dy in -2..=2i32 {
         for dx in -2..=2i32 {
             let (nx, ny) = (x as i32 + dx, y as i32 + dy);
             if nx >= 0
                 && ny >= 0
-                && nx < CELLS as i32
-                && ny < CELLS as i32
-                && tree_at[nx as usize + CELLS * ny as usize]
+                && nx < CELLS_XY as i32
+                && ny < CELLS_XY as i32
+                && tree_at[nx as usize + CELLS_XY * ny as usize]
             {
                 return true;
             }
@@ -404,8 +459,8 @@ struct Ctx<'a> {
 impl Ctx<'_> {
     /// Hash in [0,1) for `rule` at world cell coords of (x, y, z).
     fn hash(&self, rule: u64, x: u8, y: u8, z: u8) -> f32 {
-        let wx = self.coord.col as i64 * CELLS as i64 + x as i64;
-        let wy = self.coord.row as i64 * CELLS as i64 + y as i64;
+        let wx = self.coord.col as i64 * CELLS_XY as i64 + x as i64;
+        let wy = self.coord.row as i64 * CELLS_XY as i64 + y as i64;
         rule_hash01(self.seed, rule, wx, wy, z as i64)
     }
 
@@ -452,23 +507,35 @@ mod tests {
     use super::*;
     use voxel_core::SURFACE_Z;
 
-    fn world_plans(seed: u64) -> Vec<(BiomeCoord, Vec<DecorInstance>)> {
+    const FULL: u8 = CELLS_Z as u8;
+
+    fn world_plans(seed: u64) -> Vec<(BiomeCoord, BiomeType, Vec<DecorInstance>)> {
         let map = voxel_mapgen::generate(seed);
         (0..6u8)
             .flat_map(|row| (0..6u8).map(move |col| BiomeCoord::new(row, col)))
-            .map(|c| (c, plan_decor(map.biome(c), CELLS as u8, c, seed)))
+            .map(|c| {
+                let bt = map.biome_type(c);
+                (c, bt, plan_decor(map.biome(c), bt, FULL, c, seed))
+            })
             .collect()
     }
 
     #[test]
     fn planning_is_deterministic() {
+        // Per-biome plans can legitimately be empty (an 8×8 water biome with
+        // no fish roll), so compare across the whole world.
         let map = voxel_mapgen::generate(42);
-        let coord = BiomeCoord::new(2, 3);
-        let a = plan_decor(map.biome(coord), 12, coord, 42);
-        let b = plan_decor(map.biome(coord), 12, coord, 42);
-        assert_eq!(a, b);
+        let whole_world = |seed: u64| -> Vec<DecorInstance> {
+            (0..6u8)
+                .flat_map(|row| (0..6u8).map(move |col| BiomeCoord::new(row, col)))
+                .flat_map(|c| plan_decor(map.biome(c), map.biome_type(c), FULL, c, seed))
+                .collect()
+        };
+        let a = whole_world(42);
+        assert_eq!(a, whole_world(42));
+        assert!(!a.is_empty(), "seed-42 world planned no decor at all");
         assert_ne!(
-            plan_decor(map.biome(coord), 12, coord, 43),
+            whole_world(43),
             a,
             "different seed should give a different plan"
         );
@@ -477,15 +544,16 @@ mod tests {
     #[test]
     fn placement_rules_hold_on_a_real_world() {
         let map = voxel_mapgen::generate(42);
-        for (coord, plan) in world_plans(42) {
+        for (coord, bt, plan) in world_plans(42) {
             let grid = map.biome(coord);
+            let winter = bt == BiomeType::Winter;
             for inst in plan {
                 // Invert the translation back to the anchor cell.
                 let x = inst.translation.x.floor() as i32;
                 let y = inst.translation.z.floor() as i32; // Bevy Z = grid Y
-                assert!((0..CELLS as i32).contains(&x) && (0..CELLS as i32).contains(&y));
-                let (z, cell) = column_top(grid, CELLS as u8, x as u8, y as u8)
-                    .expect("decor on an empty column");
+                assert!((0..CELLS_XY as i32).contains(&x) && (0..CELLS_XY as i32).contains(&y));
+                let (z, cell) =
+                    column_top(grid, FULL, x as u8, y as u8).expect("decor on an empty column");
                 match inst.kind {
                     DecorKind::Tree | DecorKind::Flower | DecorKind::GrassProp => {
                         assert_eq!(cell, CellType::Soil, "{:?} not on soil", inst.kind);
@@ -502,6 +570,35 @@ mod tests {
                     DecorKind::Animal => {
                         assert!(cell.is_solid(), "animal on {cell:?}");
                     }
+                }
+                // Winter biomes plant only snow trees and mountain fauna;
+                // temperate biomes never plant the snow set.
+                match inst.kind {
+                    DecorKind::Tree if winter => assert!(TREE_WINTER.contains(&inst.variant)),
+                    DecorKind::Tree => assert!(TREE_TEMPERATE.contains(&inst.variant)),
+                    DecorKind::Flower | DecorKind::GrassProp => {
+                        assert!(!winter, "{:?} in a winter biome", inst.kind)
+                    }
+                    DecorKind::Animal if winter => {
+                        assert!(ANIMAL_MOUNTAIN.contains(&inst.variant))
+                    }
+                    _ => {}
+                }
+                // Flat-top rule: no lateral neighbour column below the
+                // anchor — those tops get carved by slopes/fractures.
+                if inst.kind != DecorKind::Fish {
+                    let top = |nx: i32, ny: i32| {
+                        if nx < 0 || ny < 0 || nx >= CELLS_XY as i32 || ny >= CELLS_XY as i32 {
+                            None
+                        } else {
+                            column_top(grid, FULL, nx as u8, ny as u8)
+                        }
+                    };
+                    assert!(
+                        flat_top(&top, x as u8, y as u8, z),
+                        "{:?} at ({x},{y}) on a carved (non-flat) top",
+                        inst.kind
+                    );
                 }
                 if matches!(inst.kind, DecorKind::Tree | DecorKind::Palm) {
                     assert!(
@@ -525,13 +622,15 @@ mod tests {
     #[test]
     fn every_kind_appears_somewhere_in_the_world() {
         let mut counts = [0usize; DecorKind::ALL.len()];
-        for (_, plan) in world_plans(42) {
-            for inst in plan {
-                counts[inst.kind.index()] += 1;
+        for seed in [42u64, 7, 1234] {
+            for (_, _, plan) in world_plans(seed) {
+                for inst in plan {
+                    counts[inst.kind.index()] += 1;
+                }
             }
         }
         for (kind, &n) in DecorKind::ALL.iter().zip(&counts) {
-            assert!(n > 0, "no {kind:?} anywhere in seed-42 world");
+            assert!(n > 0, "no {kind:?} anywhere across the sampled worlds");
         }
     }
 
@@ -542,14 +641,14 @@ mod tests {
         let map = voxel_mapgen::generate(42);
         let coord = BiomeCoord::new(0, 0);
         let cutoff = SURFACE_Z; // peel down into the underground
-        for inst in plan_decor(map.biome(coord), cutoff, coord, 42) {
+        for inst in plan_decor(map.biome(coord), map.biome_type(coord), cutoff, coord, 42) {
             assert!(inst.translation.y <= cutoff as f32 + 1.0);
         }
     }
 
     #[test]
     fn variants_stay_in_catalog_bounds() {
-        for (_, plan) in world_plans(42) {
+        for (_, _, plan) in world_plans(42) {
             for inst in plan {
                 assert!(inst.variant < inst.kind.models().len());
                 if inst.kind == DecorKind::Animal {

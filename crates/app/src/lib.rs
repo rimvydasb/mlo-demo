@@ -17,9 +17,9 @@ use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 use voxel_core::{BiomeCoord, WORLD_BIOMES};
 use voxel_render::{
-    build_biome_meshes, expand, proxy_material, proxy_world_offset, terrain_material,
-    water_material, BeautifyOptions, EguiWantsPointer, FocusedBiome, InspectorCamera, LayerCutoff,
-    RenderPlugin, SceneEntities,
+    build_biome_meshes, build_cell_shell_mesh, expand, proxy_material, proxy_world_offset,
+    terrain_material, water_material, BeautifyOptions, EguiWantsPointer, FocusedBiome,
+    InspectorCamera, LayerCutoff, RenderPlugin, SceneEntities,
 };
 
 // ── Public entry points ───────────────────────────────────────────────────────
@@ -177,6 +177,8 @@ pub fn run_inspector(seed: u64, opts: AppOptions) {
 struct TerrainMaterials {
     opaque: Handle<StandardMaterial>,
     water: Handle<StandardMaterial>,
+    /// Grey fog-of-war material shared by every unfocused biome shell.
+    proxy: Handle<StandardMaterial>,
 }
 
 fn rebuild_scene(
@@ -195,14 +197,19 @@ fn rebuild_scene(
         return;
     }
 
-    let (opaque_mat, water_mat) = match cached {
-        Some(c) => (c.opaque.clone(), c.water.clone()),
+    let (opaque_mat, water_mat, proxy_mat) = match cached {
+        Some(c) => (c.opaque.clone(), c.water.clone(), c.proxy.clone()),
         None => {
             let handles = TerrainMaterials {
                 opaque: materials.add(terrain_material()),
                 water: materials.add(water_material()),
+                proxy: materials.add(proxy_material()),
             };
-            let out = (handles.opaque.clone(), handles.water.clone());
+            let out = (
+                handles.opaque.clone(),
+                handles.water.clone(),
+                handles.proxy.clone(),
+            );
             commands.insert_resource(handles);
             out
         }
@@ -217,7 +224,8 @@ fn rebuild_scene(
 
     // Focused biome: expand cells → voxels, mesh, spawn (opaque + water).
     let grid = world_map.0.biome(focused.0);
-    let volume = expand(grid, cutoff.0, focused.0, state.seed, *beautify);
+    let bt = world_map.0.biome_type(focused.0);
+    let volume = expand(grid, bt, cutoff.0, focused.0, state.seed, *beautify);
     let built = build_biome_meshes(&volume, focused.0, state.seed);
 
     if let Some(mesh) = built.opaque {
@@ -243,21 +251,25 @@ fn rebuild_scene(
         scene.biome_meshes.push(e);
     }
 
-    // Proxy tiles for the other 35 biomes.
+    // Fog-of-war shells for the other 35 biomes: the full biome silhouette
+    // at cell resolution, one grey material, no voxel detail and no decor.
+    // Biomes sit exactly one cell of air apart (proxy_world_offset).
     for row in 0..WORLD_BIOMES as u8 {
         for col in 0..WORLD_BIOMES as u8 {
             let coord = BiomeCoord::new(row, col);
             if coord == focused.0 {
                 continue;
             }
-            let bt = world_map.0.biome_type(coord);
+            let Some(mesh) = build_cell_shell_mesh(world_map.0.biome(coord)) else {
+                continue;
+            };
             let offset = proxy_world_offset(coord, focused.0);
             let e = commands
                 .spawn((
-                    Mesh3d(meshes.add(Cuboid::new(11.0, 0.6, 11.0))),
-                    MeshMaterial3d(materials.add(proxy_material(bt))),
+                    Mesh3d(meshes.add(mesh)),
+                    MeshMaterial3d(proxy_mat.clone()),
                     Transform::from_translation(offset),
-                    Name::new(format!("Proxy_{row}_{col}")),
+                    Name::new(format!("FogOfWar_{row}_{col}")),
                 ))
                 .id();
             scene.proxy_tiles.push(e);

@@ -1,5 +1,5 @@
 use bevy::prelude::*;
-use voxel_core::{BiomeCoord, CellType, CELLS, SURFACE_Z, WORLD_BIOMES};
+use voxel_core::{BiomeCoord, CellType, CELLS_XY, CELLS_Z, SURFACE_Z, WORLD_BIOMES};
 
 #[derive(Resource)]
 pub struct WorldMapResource(pub voxel_mapgen::WorldMap);
@@ -16,9 +16,9 @@ pub fn scenic_biome(map: &voxel_mapgen::WorldMap) -> BiomeCoord {
 
             let mut max_relief = 0i32;
             let mut pond_cells = 0i32;
-            for y in 0..CELLS as u8 {
-                for x in 0..CELLS as u8 {
-                    let h = (SURFACE_Z + 1..CELLS as u8)
+            for y in 0..CELLS_XY as u8 {
+                for x in 0..CELLS_XY as u8 {
+                    let h = (SURFACE_Z + 1..CELLS_Z as u8)
                         .take_while(|&z| grid.get(x, y, z) != CellType::Air)
                         .count() as i32;
                     max_relief = max_relief.max(h);

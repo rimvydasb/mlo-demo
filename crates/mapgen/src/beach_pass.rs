@@ -15,9 +15,9 @@
 //! - Cells carrying relief keep their grass — a sand column under a green
 //!   hill reads as a bug, not a beach.
 
-use voxel_core::{BiomeCoord, BiomeType, CellGrid, CellType, Seed, CELLS, SURFACE_Z};
+use voxel_core::{BiomeCoord, BiomeType, CellGrid, CellType, Seed, CELLS_XY, SURFACE_Z};
 
-const MAX: u8 = CELLS as u8;
+const MAX: u8 = CELLS_XY as u8;
 const EDGE: u8 = MAX - 1;
 
 /// Ponds smaller than this stay beachless.
@@ -44,16 +44,17 @@ fn cell_hash01(seed: Seed, rule: u64, wx: i64, wy: i64, wz: i64) -> f32 {
 }
 
 /// Flip soil surface cells near large ponds to sand. Grass biomes only —
-/// sand biomes already meet their ponds in sand, and water/rock biomes have
-/// no soil surface to flip.
+/// sand biomes already meet their ponds in sand, water biomes have no soil
+/// surface to flip, and winter ponds keep their snowy shores (a sand beach
+/// in a snowfield reads as a bug).
 pub fn apply_beaches(seed: Seed, coord: BiomeCoord, bt: BiomeType, grid: &mut CellGrid) {
     if bt != BiomeType::Grass {
         return;
     }
 
     let dist = water_distance(grid);
-    let ox = coord.col as i64 * CELLS as i64;
-    let oy = coord.row as i64 * CELLS as i64;
+    let ox = coord.col as i64 * CELLS_XY as i64;
+    let oy = coord.row as i64 * CELLS_XY as i64;
 
     for y in 1..EDGE {
         for x in 1..EDGE {
@@ -85,12 +86,12 @@ pub fn apply_beaches(seed: Seed, coord: BiomeCoord, bt: BiomeType, grid: &mut Ce
 /// BFS distance from every surface cell to the nearest **large** pond
 /// (u8::MAX = unreachable / pond too small). Ponds are 4-connected water
 /// components at the surface layer.
-fn water_distance(grid: &CellGrid) -> [[u8; CELLS]; CELLS] {
-    let mut dist = [[u8::MAX; CELLS]; CELLS];
+fn water_distance(grid: &CellGrid) -> [[u8; CELLS_XY]; CELLS_XY] {
+    let mut dist = [[u8::MAX; CELLS_XY]; CELLS_XY];
     let mut queue: Vec<(u8, u8)> = Vec::new();
 
     // Seed the BFS with cells of large ponds only.
-    let mut visited = [[false; CELLS]; CELLS];
+    let mut visited = [[false; CELLS_XY]; CELLS_XY];
     for y in 0..MAX {
         for x in 0..MAX {
             if visited[y as usize][x as usize] || grid.get(x, y, SURFACE_Z) != CellType::Water {
@@ -126,7 +127,7 @@ fn water_distance(grid: &CellGrid) -> [[u8; CELLS]; CELLS] {
 /// Collect one 4-connected water component starting at (x, y).
 fn flood_pond(
     grid: &CellGrid,
-    visited: &mut [[bool; CELLS]; CELLS],
+    visited: &mut [[bool; CELLS_XY]; CELLS_XY],
     x: u8,
     y: u8,
 ) -> Vec<(u8, u8)> {

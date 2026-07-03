@@ -1,9 +1,10 @@
 //! Cell-tier invariants for `mapgen::generate`. Runs headless — no GPU.
 
-use voxel_core::{BiomeCoord, BiomeType, CellType, EdgeDir, CELLS, SURFACE_Z};
+use voxel_core::{BiomeCoord, BiomeType, CellType, EdgeDir, CELLS_XY, CELLS_Z, SURFACE_Z};
 use voxel_mapgen::generate;
 
-const MAX: u8 = CELLS as u8;
+const MAX: u8 = CELLS_XY as u8;
+const TOP: u8 = CELLS_Z as u8;
 const EDGE: u8 = MAX - 1;
 
 // ── Determinism ──────────────────────────────────────────────────────────────
@@ -86,13 +87,14 @@ fn check_biome_invariants(map: &voxel_mapgen::WorldMap, coord: BiomeCoord) {
                         "{label} ({x},{y},5) edge ring must match biome surface type"
                     );
                 } else {
-                    let pond_ok =
-                        c == CellType::Water && matches!(bt, BiomeType::Grass | BiomeType::Sand);
+                    let pond_ok = c == CellType::Water
+                        && matches!(bt, BiomeType::Grass | BiomeType::Sand | BiomeType::Winter);
                     // Beach pass: grass-biome interiors may flip soil → sand
-                    // near large ponds.
+                    // near large ponds. Water-biome interiors grow sand islands.
                     let beach_ok = c == CellType::Sand && bt == BiomeType::Grass;
+                    let island_ok = c == CellType::Sand && bt == BiomeType::Water;
                     assert!(
-                        c == bt.surface_cell() || pond_ok || beach_ok,
+                        c == bt.surface_cell() || pond_ok || beach_ok || island_ok,
                         "{label} ({x},{y},5) unexpected surface cell {c:?}"
                     );
                 }
@@ -100,7 +102,7 @@ fn check_biome_invariants(map: &voxel_mapgen::WorldMap, coord: BiomeCoord) {
 
             // Relief (z = 6..12): soil/sand/stone columns, no resources, no
             // floating cells, flat on the edge ring and over water.
-            for z in SURFACE_Z + 1..MAX {
+            for z in SURFACE_Z + 1..TOP {
                 let c = grid.get(x, y, z);
                 assert!(
                     matches!(

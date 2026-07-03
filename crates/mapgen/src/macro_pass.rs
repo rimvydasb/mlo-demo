@@ -7,7 +7,7 @@ const BIOME_VARIANTS: [BiomeType; 4] = [
     BiomeType::Grass,
     BiomeType::Sand,
     BiomeType::Water,
-    BiomeType::Rock,
+    BiomeType::Winter,
 ];
 const BIOME_WEIGHTS: [u32; 4] = [40, 25, 20, 15];
 

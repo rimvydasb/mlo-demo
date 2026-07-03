@@ -2,17 +2,19 @@
 //!
 //! This is the only place the visual voxel tier exists. `mapgen` and future
 //! `sim` code never see it. The expansion is a pure function of the cell
-//! grid, the layer cutoff, and the biome's world position + seed (for the
-//! deterministic underside erosion), so screenshots are stable.
+//! grid, the biome type, the layer cutoff, and the biome's world position +
+//! seed (for the deterministic underside erosion), so screenshots are stable.
 
-use voxel_core::{BiomeCoord, CellGrid, CellType, CELLS, SNOW_Z, SURFACE_Z};
+use voxel_core::{BiomeCoord, BiomeType, CellGrid, CellType, CELLS_XY, CELLS_Z, SNOW_Z, SURFACE_Z};
 
 use crate::beautify::BeautifyOptions;
 
 /// Voxels per cell edge.
 pub const SUB: usize = 4;
-/// Voxels per biome edge.
-pub const VOX: usize = CELLS * SUB; // 48
+/// Voxels per biome edge in the horizontal plane.
+pub const VOX_XY: usize = CELLS_XY * SUB; // 32
+/// Voxels per biome column (vertical).
+pub const VOX_Z: usize = CELLS_Z * SUB; // 48
 
 /// Visual voxel material. Distinct from `CellType`: soil splits into
 /// grass/dirt, tall stone grows snow caps, and Air means "no voxel".
@@ -37,7 +39,7 @@ impl VoxelKind {
     }
 }
 
-/// 48³ voxel volume for one biome.
+/// 32×32×48 voxel volume for one biome.
 pub struct VoxelVolume {
     data: Box<[VoxelKind]>,
 }
@@ -45,13 +47,13 @@ pub struct VoxelVolume {
 impl VoxelVolume {
     fn new() -> Self {
         Self {
-            data: vec![VoxelKind::Air; VOX * VOX * VOX].into_boxed_slice(),
+            data: vec![VoxelKind::Air; VOX_XY * VOX_XY * VOX_Z].into_boxed_slice(),
         }
     }
 
     #[inline]
     fn idx(x: usize, y: usize, z: usize) -> usize {
-        x + VOX * y + VOX * VOX * z
+        x + VOX_XY * y + VOX_XY * VOX_XY * z
     }
 
     #[inline]
@@ -67,8 +69,9 @@ impl VoxelVolume {
     /// Out-of-bounds reads as Air.
     #[inline]
     pub fn get_or_air(&self, x: i32, y: i32, z: i32) -> VoxelKind {
-        let max = VOX as i32;
-        if x < 0 || y < 0 || z < 0 || x >= max || y >= max || z >= max {
+        let max_xy = VOX_XY as i32;
+        let max_z = VOX_Z as i32;
+        if x < 0 || y < 0 || z < 0 || x >= max_xy || y >= max_xy || z >= max_z {
             VoxelKind::Air
         } else {
             self.get(x as usize, y as usize, z as usize)
@@ -80,7 +83,8 @@ impl VoxelVolume {
 ///
 /// `cutoff` hides cell layers with z ≥ cutoff (the inspector's layer peel);
 /// peeled cells count as air, so freshly exposed soil grows a grass top just
-/// like natural terrain.
+/// like natural terrain. `bt` drives the winter dressing: in winter biomes
+/// every exposed soil or stone top wears snow instead of grass.
 ///
 /// Pipeline: base cell → voxel patterns, then the beautification passes
 /// (slopes, cliff fractures, optional microheight, retop, grass overhang —
@@ -88,17 +92,18 @@ impl VoxelVolume {
 /// erosion, and the pinhole seal (no single-voxel air holes underground).
 pub fn expand(
     grid: &CellGrid,
+    bt: BiomeType,
     cutoff: u8,
     coord: BiomeCoord,
     seed: u64,
     opts: BeautifyOptions,
 ) -> VoxelVolume {
     let mut vol = VoxelVolume::new();
-    let max = CELLS as u8;
+    let winter = bt == BiomeType::Winter;
 
-    for z in 0..max.min(cutoff) {
-        for y in 0..max {
-            for x in 0..max {
+    for z in 0..(CELLS_Z as u8).min(cutoff) {
+        for y in 0..CELLS_XY as u8 {
+            for x in 0..CELLS_XY as u8 {
                 let cell = grid.get(x, y, z);
                 if cell == CellType::Air {
                     continue;
@@ -108,14 +113,14 @@ pub fn expand(
                 } else {
                     grid.get_or_air(x as i32, y as i32, z as i32 + 1)
                 };
-                expand_cell(&mut vol, x, y, z, cell, above == CellType::Air);
+                expand_cell(&mut vol, x, y, z, cell, above == CellType::Air, winter);
             }
         }
     }
 
-    let ox = coord.col as i64 * VOX as i64;
-    let oy = coord.row as i64 * VOX as i64;
-    let ctx = crate::beautify::BeautifyCtx::new(grid, cutoff, ox, oy, seed);
+    let ox = coord.col as i64 * VOX_XY as i64;
+    let oy = coord.row as i64 * VOX_XY as i64;
+    let ctx = crate::beautify::BeautifyCtx::new(grid, cutoff, ox, oy, seed, winter);
     crate::beautify::apply(&mut vol, &ctx, opts);
 
     carve_caves(&mut vol, coord, seed);
@@ -126,19 +131,22 @@ pub fn expand(
 
 /// Voxel sub-layers (dz = 0 bottom .. 3 top) for one cell — the pure
 /// cell → voxel pattern from the spec table in rendering.md. Also drives the
-/// inspector's expansion-preview panel.
-pub fn cell_column(cell: CellType, top_air: bool, cz: u8) -> [VoxelKind; SUB] {
+/// inspector's expansion-preview panel. `winter` swaps the exposed-top
+/// dressing: soil tops wear snow instead of grass, and stone tops are snowy
+/// at any height, not just in the SNOW_Z band.
+pub fn cell_column(cell: CellType, top_air: bool, cz: u8, winter: bool) -> [VoxelKind; SUB] {
     std::array::from_fn(|dz| {
         let top = dz == SUB - 1;
         match cell {
             CellType::Air => VoxelKind::Air,
+            CellType::Soil if top_air && top && winter => VoxelKind::Snow,
             CellType::Soil if top_air && top => VoxelKind::Grass,
             CellType::Soil => VoxelKind::Dirt,
             CellType::Sand if top_air && top => VoxelKind::Air, // sand sits slightly sunken
             CellType::Sand => VoxelKind::Sand,
             CellType::Water if top_air && dz >= SUB / 2 => VoxelKind::Air, // sunken water surface
             CellType::Water => VoxelKind::Water,
-            CellType::Stone if top_air && top && cz >= SNOW_Z => VoxelKind::Snow,
+            CellType::Stone if top_air && top && (winter || cz >= SNOW_Z) => VoxelKind::Snow,
             CellType::Stone => VoxelKind::Stone,
             CellType::Gold => VoxelKind::Gold,
             CellType::Iron => VoxelKind::Iron,
@@ -147,8 +155,16 @@ pub fn cell_column(cell: CellType, top_air: bool, cz: u8) -> [VoxelKind; SUB] {
 }
 
 /// One cell → its 4×4×4 voxel block.
-fn expand_cell(vol: &mut VoxelVolume, cx: u8, cy: u8, cz: u8, cell: CellType, top_air: bool) {
-    let column = cell_column(cell, top_air, cz);
+fn expand_cell(
+    vol: &mut VoxelVolume,
+    cx: u8,
+    cy: u8,
+    cz: u8,
+    cell: CellType,
+    top_air: bool,
+    winter: bool,
+) {
+    let column = cell_column(cell, top_air, cz, winter);
     for (dz, &kind) in column.iter().enumerate() {
         if kind == VoxelKind::Air {
             continue;
@@ -194,8 +210,8 @@ const RULE_CAVE: u64 = 8;
 /// and they are voxel-tier only: the cell grid (mining, invariants) never
 /// changes.
 fn carve_caves(vol: &mut VoxelVolume, coord: BiomeCoord, seed: u64) {
-    let ox = coord.col as i64 * VOX as i64;
-    let oy = coord.row as i64 * VOX as i64;
+    let ox = coord.col as i64 * VOX_XY as i64;
+    let oy = coord.row as i64 * VOX_XY as i64;
     // Per-biome, per-cave parameter hash: world offset + cave/param ids.
     let param = |cave: u64, p: u64| {
         crate::beautify::rule_hash01(seed, RULE_CAVE + cave * 16 + p, ox, oy, 0)
@@ -203,20 +219,20 @@ fn carve_caves(vol: &mut VoxelVolume, coord: BiomeCoord, seed: u64) {
 
     let count = (param(0, 0) * 3.0) as u64; // 0, 1, or 2 caves
     for cave in 1..=count {
-        let rx = 3.0 + param(cave, 1) * 3.0; // lateral radii 3–6 voxels
-        let ry = 3.0 + param(cave, 2) * 3.0;
+        let rx = 2.5 + param(cave, 1) * 2.5; // lateral radii 2.5–5 voxels
+        let ry = 2.5 + param(cave, 2) * 2.5;
         let rz = 2.0 + param(cave, 3) * 1.5; // flatter than wide, like real pockets
                                              // Center: laterally well inside the biome, vertically inside the
                                              // funnel mass but below the surface-support band (cap + margin ≤ 16).
         let margin = 2.0;
-        let cx = rx + margin + param(cave, 4) * (VOX as f32 - 2.0 * (rx + margin));
-        let cy = ry + margin + param(cave, 5) * (VOX as f32 - 2.0 * (ry + margin));
+        let cx = rx + margin + param(cave, 4) * (VOX_XY as f32 - 2.0 * (rx + margin));
+        let cy = ry + margin + param(cave, 5) * (VOX_XY as f32 - 2.0 * (ry + margin));
         let z_top = (4 * SUB) as f32 - rz; // cell z=4 stays untouched
         let cz = rz + margin + param(cave, 6) * (z_top - rz - margin).max(0.0);
 
         for z in 0..4 * SUB {
-            for y in 0..VOX {
-                for x in 0..VOX {
+            for y in 0..VOX_XY {
+                for x in 0..VOX_XY {
                     let dx = (x as f32 + 0.5 - cx) / rx;
                     let dy = (y as f32 + 0.5 - cy) / ry;
                     let dz = (z as f32 + 0.5 - cz) / rz;
@@ -241,8 +257,8 @@ fn seal_pinholes(vol: &mut VoxelVolume) {
     loop {
         let mut fills: Vec<(usize, usize, usize, VoxelKind)> = Vec::new();
         for z in 0..UNDERGROUND_TOP {
-            for y in 0..VOX {
-                for x in 0..VOX {
+            for y in 0..VOX_XY {
+                for x in 0..VOX_XY {
                     if vol.get(x, y, z) != VoxelKind::Air {
                         continue;
                     }
@@ -297,8 +313,8 @@ fn dominant_kind(neighbors: &[VoxelKind; 6]) -> VoxelKind {
 /// crisp. Two passes deepen the erosion near the bottom.
 fn erode_underside(vol: &mut VoxelVolume, coord: BiomeCoord, seed: u64) {
     let underground_top = SURFACE_Z as usize * SUB; // voxel z below this is underground
-    let ox = coord.col as i64 * VOX as i64;
-    let oy = coord.row as i64 * VOX as i64;
+    let ox = coord.col as i64 * VOX_XY as i64;
+    let oy = coord.row as i64 * VOX_XY as i64;
 
     for pass in 0..2u64 {
         let mut removals: Vec<(usize, usize, usize)> = Vec::new();
@@ -306,8 +322,8 @@ fn erode_underside(vol: &mut VoxelVolume, coord: BiomeCoord, seed: u64) {
             // Erosion gets more aggressive toward the island's bottom tip.
             let depth01 = 1.0 - z as f32 / underground_top as f32;
             let threshold = 0.25 + 0.35 * depth01;
-            for y in 0..VOX {
-                for x in 0..VOX {
+            for y in 0..VOX_XY {
+                for x in 0..VOX_XY {
                     if vol.get(x, y, z) == VoxelKind::Air {
                         continue;
                     }
@@ -345,8 +361,8 @@ mod tests {
 
     fn flat_soil_grid() -> CellGrid {
         let mut g = CellGrid::new();
-        for y in 0..12u8 {
-            for x in 0..12u8 {
+        for y in 0..CELLS_XY as u8 {
+            for x in 0..CELLS_XY as u8 {
                 for z in 0..=SURFACE_Z {
                     g.set(x, y, z, CellType::Soil);
                 }
@@ -356,7 +372,7 @@ mod tests {
     }
 
     fn top_of(vol: &VoxelVolume, x: usize, y: usize) -> Option<(usize, VoxelKind)> {
-        (0..VOX)
+        (0..VOX_Z)
             .rev()
             .find(|&z| vol.get(x, y, z) != VoxelKind::Air)
             .map(|z| (z, vol.get(x, y, z)))
@@ -366,14 +382,40 @@ mod tests {
     fn soil_grows_grass_top_when_exposed() {
         let vol = expand(
             &flat_soil_grid(),
-            12,
+            BiomeType::Grass,
+            CELLS_Z as u8,
             BiomeCoord::new(0, 0),
             1,
             BeautifyOptions::default(),
         );
         let top = SURFACE_Z as usize * SUB + SUB - 1;
-        assert_eq!(vol.get(20, 20, top), VoxelKind::Grass);
-        assert_eq!(vol.get(20, 20, top - 1), VoxelKind::Dirt);
+        assert_eq!(vol.get(16, 16, top), VoxelKind::Grass);
+        assert_eq!(vol.get(16, 16, top - 1), VoxelKind::Dirt);
+    }
+
+    #[test]
+    fn winter_soil_grows_snow_top_when_exposed() {
+        let vol = expand(
+            &flat_soil_grid(),
+            BiomeType::Winter,
+            CELLS_Z as u8,
+            BiomeCoord::new(0, 0),
+            1,
+            BeautifyOptions::default(),
+        );
+        let top = SURFACE_Z as usize * SUB + SUB - 1;
+        assert_eq!(vol.get(16, 16, top), VoxelKind::Snow);
+        assert_eq!(vol.get(16, 16, top - 1), VoxelKind::Dirt);
+    }
+
+    #[test]
+    fn winter_stone_is_snow_capped_at_any_height() {
+        // In winter, exposed stone wears snow well below the SNOW_Z band.
+        let col = cell_column(CellType::Stone, true, SURFACE_Z, true);
+        assert_eq!(col[SUB - 1], VoxelKind::Snow);
+        // Outside winter the low stone top stays bare.
+        let col = cell_column(CellType::Stone, true, SURFACE_Z, false);
+        assert_eq!(col[SUB - 1], VoxelKind::Stone);
     }
 
     #[test]
@@ -381,40 +423,55 @@ mod tests {
         // Cut at cell layer 3: the top of cell z=2 becomes exposed soil → grass.
         let vol = expand(
             &flat_soil_grid(),
+            BiomeType::Grass,
             3,
             BiomeCoord::new(0, 0),
             1,
             BeautifyOptions::default(),
         );
         let top = 2 * SUB + SUB - 1;
-        assert_eq!(vol.get(20, 20, top), VoxelKind::Grass);
+        assert_eq!(vol.get(16, 16, top), VoxelKind::Grass);
         // Nothing above the cutoff — grass tops stay flat (FLAT TOPS).
-        assert_eq!(vol.get(20, 20, 3 * SUB), VoxelKind::Air);
-        assert_eq!(vol.get(20, 20, 3 * SUB + 1), VoxelKind::Air);
+        assert_eq!(vol.get(16, 16, 3 * SUB), VoxelKind::Air);
+        assert_eq!(vol.get(16, 16, 3 * SUB + 1), VoxelKind::Air);
     }
 
     #[test]
     fn exposed_water_is_sunken() {
         let mut g = flat_soil_grid();
-        g.set(6, 6, SURFACE_Z, CellType::Water);
-        let vol = expand(&g, 12, BiomeCoord::new(0, 0), 1, BeautifyOptions::default());
+        g.set(4, 4, SURFACE_Z, CellType::Water);
+        let vol = expand(
+            &g,
+            BiomeType::Grass,
+            CELLS_Z as u8,
+            BiomeCoord::new(0, 0),
+            1,
+            BeautifyOptions::default(),
+        );
         let base = SURFACE_Z as usize * SUB;
-        assert_eq!(vol.get(25, 25, base), VoxelKind::Water);
-        assert_eq!(vol.get(25, 25, base + 1), VoxelKind::Water);
-        assert_eq!(vol.get(25, 25, base + 2), VoxelKind::Air);
-        assert_eq!(vol.get(25, 25, base + 3), VoxelKind::Air);
+        assert_eq!(vol.get(17, 17, base), VoxelKind::Water);
+        assert_eq!(vol.get(17, 17, base + 1), VoxelKind::Water);
+        assert_eq!(vol.get(17, 17, base + 2), VoxelKind::Air);
+        assert_eq!(vol.get(17, 17, base + 3), VoxelKind::Air);
     }
 
     #[test]
     fn snow_caps_tall_stone_only() {
         let mut g = flat_soil_grid();
-        for z in SURFACE_Z + 1..12 {
-            g.set(6, 6, z, CellType::Stone);
+        for z in SURFACE_Z + 1..CELLS_Z as u8 {
+            g.set(4, 4, z, CellType::Stone);
         }
-        let vol = expand(&g, 12, BiomeCoord::new(0, 0), 1, BeautifyOptions::default());
+        let vol = expand(
+            &g,
+            BiomeType::Grass,
+            CELLS_Z as u8,
+            BiomeCoord::new(0, 0),
+            1,
+            BeautifyOptions::default(),
+        );
         // The peak column may be chamfered by SLOPES/CLIFF FRACTURES, but
         // whatever remains on top in the snow band must be snow (retop).
-        let (peak_z, peak_kind) = top_of(&vol, 25, 25).unwrap();
+        let (peak_z, peak_kind) = top_of(&vol, 17, 17).unwrap();
         assert!(
             peak_z >= SNOW_Z as usize * SUB,
             "peak carved below snow band"
@@ -422,7 +479,7 @@ mod tests {
         assert_eq!(peak_kind, VoxelKind::Snow);
         // Below the snow band it stays bare stone even where locally exposed.
         let low_top = 8 * SUB + SUB - 1;
-        assert_eq!(vol.get(25, 25, low_top), VoxelKind::Stone);
+        assert_eq!(vol.get(17, 17, low_top), VoxelKind::Stone);
     }
 
     #[test]
@@ -434,10 +491,17 @@ mod tests {
         for row in 0..3u8 {
             for col in 0..3u8 {
                 let coord = BiomeCoord::new(row, col);
-                let vol = expand(map.biome(coord), 12, coord, 42, BeautifyOptions::default());
+                let vol = expand(
+                    map.biome(coord),
+                    map.biome_type(coord),
+                    CELLS_Z as u8,
+                    coord,
+                    42,
+                    BeautifyOptions::default(),
+                );
                 for z in 0..UNDERGROUND_TOP {
-                    for y in 0..VOX {
-                        for x in 0..VOX {
+                    for y in 0..VOX_XY {
+                        for x in 0..VOX_XY {
                             if vol.get(x, y, z) != VoxelKind::Air {
                                 continue;
                             }
@@ -466,9 +530,9 @@ mod tests {
         // Caves may only remove voxels below cell z=4 (voxel z<16): the band
         // directly under the surface keeps its visual support everywhere.
         let mut solid = VoxelVolume::new();
-        for z in 0..VOX {
-            for y in 0..VOX {
-                for x in 0..VOX {
+        for z in 0..VOX_Z {
+            for y in 0..VOX_XY {
+                for x in 0..VOX_XY {
                     solid.set(x, y, z, VoxelKind::Dirt);
                 }
             }
@@ -479,9 +543,9 @@ mod tests {
                 let mut vol = VoxelVolume::new();
                 vol.data.copy_from_slice(&solid.data);
                 carve_caves(&mut vol, BiomeCoord::new(row, col), 42);
-                for z in 0..VOX {
-                    for y in 0..VOX {
-                        for x in 0..VOX {
+                for z in 0..VOX_Z {
+                    for y in 0..VOX_XY {
+                        for x in 0..VOX_XY {
                             let is_air = vol.get(x, y, z) == VoxelKind::Air;
                             carved_any |= is_air;
                             assert!(
@@ -500,11 +564,25 @@ mod tests {
     fn expansion_is_deterministic() {
         let g = flat_soil_grid();
         let opts = BeautifyOptions { microheight: true };
-        let a = expand(&g, 12, BiomeCoord::new(2, 3), 42, opts);
-        let b = expand(&g, 12, BiomeCoord::new(2, 3), 42, opts);
-        for z in 0..VOX {
-            for y in 0..VOX {
-                for x in 0..VOX {
+        let a = expand(
+            &g,
+            BiomeType::Grass,
+            CELLS_Z as u8,
+            BiomeCoord::new(2, 3),
+            42,
+            opts,
+        );
+        let b = expand(
+            &g,
+            BiomeType::Grass,
+            CELLS_Z as u8,
+            BiomeCoord::new(2, 3),
+            42,
+            opts,
+        );
+        for z in 0..VOX_Z {
+            for y in 0..VOX_XY {
+                for x in 0..VOX_XY {
                     assert_eq!(a.get(x, y, z), b.get(x, y, z));
                 }
             }

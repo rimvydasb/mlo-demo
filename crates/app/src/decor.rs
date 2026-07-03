@@ -91,7 +91,8 @@ fn rebuild_decor(
     }
 
     let grid = world_map.0.biome(focused.0);
-    for inst in plan_decor(grid, cutoff.0, focused.0, state.seed) {
+    let bt = world_map.0.biome_type(focused.0);
+    for inst in plan_decor(grid, bt, cutoff.0, focused.0, state.seed) {
         let motion = match inst.kind {
             DecorKind::Animal => Motion::Hop,
             DecorKind::Fish => Motion::Swim,

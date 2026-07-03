@@ -9,7 +9,8 @@
 //! Each cloud is a small cluster of white cubes (per the reference art —
 //! clouds keep the voxel language) sharing one translucent material, so a
 //! whole cloud fades as a unit. Clouds drift east; past the biome's far edge
-//! they fade out over a second and a replacement fades in at the near edge.
+//! they fade out slowly (a smoothstep over `FADE_SECS`) and a replacement
+//! fades in at the near edge the same way — no pops, no flicker.
 
 use bevy::light::NotShadowCaster;
 use bevy::prelude::*;
@@ -29,15 +30,17 @@ impl Plugin for CloudsPlugin {
     }
 }
 
-const CLOUD_COUNT: usize = 7;
-/// The top few world units above the focused biome (terrain tops out at 12).
-const ALTITUDE: std::ops::Range<f32> = 13.0..16.5;
-/// North-south lane across the biome (world z).
-const LANE: std::ops::Range<f32> = -1.0..13.0;
-const SPAWN_X: f32 = -7.0;
+const CLOUD_COUNT: usize = 6;
+/// Just above the terrain (tops out at 12) but below the default camera eye
+/// (~17 units up) — a cloud band at eye height fills the frame with cubes.
+const ALTITUDE: std::ops::Range<f32> = 12.5..14.5;
+/// North-south lane across the biome (world z; the biome spans 0..8).
+const LANE: std::ops::Range<f32> = -1.0..9.0;
+const SPAWN_X: f32 = -6.0;
 /// Fade out once the cloud center clears the biome's far (east) edge.
-const FADE_OUT_X: f32 = 15.0;
-const FADE_SECS: f32 = 1.0;
+const FADE_OUT_X: f32 = 11.0;
+/// Slow, soft crossfade — short fades read as flicker against the sky.
+const FADE_SECS: f32 = 4.0;
 /// Slightly translucent, not glassy.
 const CLOUD_ALPHA: f32 = 0.9;
 /// Cube edge lengths snap to the voxel size so clouds share the terrain's
@@ -130,14 +133,14 @@ fn spawn_cloud(
             // A fat core cube with smaller puffs packed around it, flatter
             // than wide, everything snapped to the voxel grid.
             let (offset, size) = if i == 0 {
-                (Vec3::ZERO, 1.25)
+                (Vec3::ZERO, 0.9)
             } else {
-                let dx = snap(rng.gen_range(-1.75..1.75));
-                let dy = snap(rng.gen_range(-0.25..0.5));
-                let dz = snap(rng.gen_range(-1.0..1.0));
+                let dx = snap(rng.gen_range(-1.25..1.25));
+                let dy = snap(rng.gen_range(-0.25..0.25));
+                let dz = snap(rng.gen_range(-0.75..0.75));
                 let spread = (dx * dx * 0.35 + dz * dz).sqrt();
-                let size = snap((1.3 - 0.3 * spread) * rng.gen_range(0.7..1.1));
-                (Vec3::new(dx, dy, dz), size.clamp(0.5, 1.25))
+                let size = snap((0.95 - 0.25 * spread) * rng.gen_range(0.7..1.1));
+                (Vec3::new(dx, dy, dz), size.clamp(0.25, 0.9))
             };
             cloud.spawn((
                 Mesh3d(assets.cube.clone()),
@@ -147,6 +150,12 @@ fn spawn_cloud(
             ));
         }
     });
+}
+
+/// Hermite ease: zero-velocity start and end, so fades ramp gently instead
+/// of snapping at the endpoints (the old linear fade read as flicker).
+fn smoothstep(t: f32) -> f32 {
+    t * t * (3.0 - 2.0 * t)
 }
 
 fn drift_clouds(
@@ -168,7 +177,7 @@ fn drift_clouds(
         let alpha = match &mut cloud.fade {
             Fade::In(t) => {
                 *t += dt;
-                let a = CLOUD_ALPHA * (*t / FADE_SECS).min(1.0);
+                let a = CLOUD_ALPHA * smoothstep((*t / FADE_SECS).min(1.0));
                 if *t >= FADE_SECS {
                     cloud.fade = Fade::Full;
                 }
@@ -182,7 +191,7 @@ fn drift_clouds(
             }
             Fade::Out(t) => {
                 *t += dt;
-                let a = CLOUD_ALPHA * (1.0 - *t / FADE_SECS).max(0.0);
+                let a = CLOUD_ALPHA * smoothstep((1.0 - *t / FADE_SECS).max(0.0));
                 if *t >= FADE_SECS {
                     commands.entity(entity).despawn();
                     spawn_cloud(

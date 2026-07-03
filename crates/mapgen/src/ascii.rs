@@ -1,14 +1,14 @@
 //! ASCII dumps for headless inspection and snapshot tests.
 
 use crate::WorldMap;
-use voxel_core::{BiomeCoord, BiomeType, CellType, EdgeDir, CELLS, SURFACE_Z};
+use voxel_core::{BiomeCoord, BiomeType, CellType, EdgeDir, CELLS_XY, CELLS_Z, SURFACE_Z};
 
 fn biome_char(bt: BiomeType) -> char {
     match bt {
         BiomeType::Grass => '.',
         BiomeType::Sand => 's',
         BiomeType::Water => '~',
-        BiomeType::Rock => '#',
+        BiomeType::Winter => '*',
     }
 }
 
@@ -31,7 +31,7 @@ const LEGEND: &str = "legend: (space) air  . soil  s sand  ~ water  # stone  G g
 pub fn ascii_dump(map: &WorldMap, coord: BiomeCoord) -> String {
     let grid = map.biome(coord);
     let bt = map.biome_type(coord);
-    let max = CELLS as u8;
+    let max = CELLS_XY as u8;
     let mut out = String::new();
 
     out.push_str(&format!(
@@ -52,7 +52,7 @@ pub fn ascii_dump(map: &WorldMap, coord: BiomeCoord) -> String {
     out.push_str("\nrelief height (cells above surface, 0-6):\n");
     for y in 0..max {
         for x in 0..max {
-            let h = (SURFACE_Z + 1..max)
+            let h = (SURFACE_Z + 1..CELLS_Z as u8)
                 .take_while(|&z| grid.get(x, y, z) != CellType::Air)
                 .count();
             out.push(char::from_digit(h as u32, 10).unwrap());
@@ -78,7 +78,7 @@ pub fn ascii_dump(map: &WorldMap, coord: BiomeCoord) -> String {
 pub fn ascii_macro(map: &WorldMap) -> String {
     let mut out = String::new();
     out.push_str("6×6 macro map\n");
-    out.push_str("legend:  . grass  s sand  ~ water  # rock\n");
+    out.push_str("legend:  . grass  s sand  ~ water  * winter\n");
     out.push_str("         = compatible H edge  | compatible V edge\n\n");
 
     for row in 0..6u8 {

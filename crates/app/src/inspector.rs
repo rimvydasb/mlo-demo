@@ -1,6 +1,8 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
-use voxel_core::{BiomeCoord, BiomeType, CellType, CELLS, SNOW_Z, SURFACE_Z, WORLD_BIOMES};
+use voxel_core::{
+    BiomeCoord, BiomeType, CellType, CELLS_XY, CELLS_Z, SNOW_Z, SURFACE_Z, WORLD_BIOMES,
+};
 use voxel_render::{
     base_color_srgb, cell_column, EguiWantsPointer, FocusedBiome, LayerCutoff, VoxelKind, SUB,
 };
@@ -13,7 +15,7 @@ fn biome_char(bt: BiomeType) -> char {
         BiomeType::Grass => '.',
         BiomeType::Sand => 's',
         BiomeType::Water => '~',
-        BiomeType::Rock => '#',
+        BiomeType::Winter => '*',
     }
 }
 
@@ -75,7 +77,7 @@ pub fn egui_inspector(
             ui.label("Layer peel (hide upper cell layers)");
             let mut cut = cutoff.0 as u32;
             if ui
-                .add(egui::Slider::new(&mut cut, 1u32..=CELLS as u32).text("layers"))
+                .add(egui::Slider::new(&mut cut, 1u32..=CELLS_Z as u32).text("layers"))
                 .changed()
             {
                 cutoff.0 = cut as u8;
@@ -88,7 +90,7 @@ pub fn egui_inspector(
 
             // ── 6×6 biome selector ────────────────────────────────────────
             ui.label("6×6 biome grid (click to focus)");
-            ui.label("legend: . grass  s sand  ~ water  # rock");
+            ui.label("legend: . grass  s sand  ~ water  * winter");
             egui::Grid::new("biome_grid")
                 .spacing([3.0, 3.0])
                 .show(ui, |ui| {
@@ -163,8 +165,8 @@ pub fn egui_inspector(
                 let cell = grid.get(cx, cy, cz);
 
                 ui.label(format!("Local  ({cx}, {cy}, {cz})"));
-                let wx = focused.0.col as u16 * CELLS as u16 + cx as u16;
-                let wy = focused.0.row as u16 * CELLS as u16 + cy as u16;
+                let wx = focused.0.col as u16 * CELLS_XY as u16 + cx as u16;
+                let wy = focused.0.row as u16 * CELLS_XY as u16 + cy as u16;
                 ui.label(format!("World  ({wx}, {wy})  cell layer {}", cz + 1));
 
                 let band = if cz < SURFACE_Z {
@@ -212,8 +214,8 @@ fn expansion_preview(ui: &mut egui::Ui) {
                 } else {
                     SURFACE_Z
                 };
-                column_swatch(ui, cell_column(cell, true, cz));
-                column_swatch(ui, cell_column(cell, false, cz));
+                column_swatch(ui, cell_column(cell, true, cz, false));
+                column_swatch(ui, cell_column(cell, false, cz, false));
                 ui.end_row();
             }
         });
